@@ -11,6 +11,10 @@ import { ClerkProvider, RedirectToSignIn, Show } from "@clerk/react";
 import type { Route } from "./+types/root";
 import "./app.css";
 
+const clerkPublishableKey =
+	import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ??
+	"pk_test_Zmx1ZW50LXdlcmV3b2xmLTEyMjAuY2xlcmsuYWNjb3VudHMuZGV2JA";
+
 export const links: Route.LinksFunction = () => [
 	{ rel: "preconnect", href: "https://fonts.googleapis.com" },
 	{
@@ -44,7 +48,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
 export default function App() {
 	return (
-		<ClerkProvider publishableKey={import.meta.env.VITE_CLERK_PUBLISHABLE_KEY}>
+		<ClerkProvider publishableKey={clerkPublishableKey}>
 			<Show when="signed-out">
 				<RedirectToSignIn />
 			</Show>
