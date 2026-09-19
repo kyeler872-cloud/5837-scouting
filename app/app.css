@@ -21,7 +21,7 @@ body {
 
 .home-shell {
 	min-height: 100vh;
-	background: radial-gradient(circle at 84% 18%, #163f67 0, transparent 28rem), var(--navy-950);
+	/* background: radial-gradient(circle at 84% 18%, #163f67 0, transparent 28rem), var(--navy-950); */
 }
 
 .sign-in-page {
