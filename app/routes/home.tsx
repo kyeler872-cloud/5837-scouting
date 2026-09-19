@@ -164,8 +164,8 @@ export default function Home() {
 						<header className="team-heading">
 							<div>
 								<p className="section-kicker">Team {result.teamNumber} / {result.season} season</p>
-								<SourceMark /><EditableValue field="name" value={shownValue(result, "name", result.team, ["nameLong", "nameShort", "name"])} attribution={result.overrides.name?.displayName} onSave={saveOverride} heading />
-								<SourceMark /><EditableValue field="location" value={result.overrides.location?.value || [textValue(result.team, ["city"]), textValue(result.team, ["state"]), textValue(result.team, ["country"])].filter(Boolean).join(", ") || "Unavailable"} attribution={result.overrides.location?.displayName} onSave={saveOverride} />
+								<SourceMark /><h2>{textValue(result.team, ["nameLong", "nameShort", "name"]) || `Team ${result.teamNumber}`}</h2>
+								<SourceMark /><p>{[textValue(result.team, ["city"]), textValue(result.team, ["state"]), textValue(result.team, ["country"])].filter(Boolean).join(", ") || "Location unavailable"}</p>
 							</div>
 							{(() => { const logo = textValue(result.team, ["logo", "logoUrl", "teamLogo"]); return logo ? <img className="team-logo" src={logo} alt="Team logo" /> : null; })()}
 						</header>
@@ -189,7 +189,7 @@ export default function Home() {
 }
 
 function SourceMark() {
-	return <img className="first-mark" src="https://www.firstinspires.org/sites/default/files/uploads/resource_library/brand/first-logo.png" alt="From FIRST" title="Data from FIRST" />;
+	return <img className="first-mark" src="https://ftc-events-cdn.global-prod.ftclive.org/eventweb_ftc/images/first_logo_onecolor_reverse-EE4B5058.svg" alt="From FIRST" title="Data from FIRST" />;
 }
 
 function ResultList({ title, items, primaryKeys, firstSource = false }: { title: string; items: JsonRecord[]; primaryKeys: string[]; firstSource?: boolean }) {
@@ -202,10 +202,11 @@ function ResultList({ title, items, primaryKeys, firstSource = false }: { title:
 }
 
 function EventList({ items, selectedEvents, onSelect }: { items: JsonRecord[]; selectedEvents: TeamLookupResponse["selectedEvents"]; onSelect: (code: string, name: string, selected: boolean) => Promise<void> }) {
-	return <section className="result-list"><h3><SourceMark />Events</h3>{items.length ? items.slice(0, 12).map((item, index) => {
+	const [selectionMode, setSelectionMode] = useState(false);
+	return <section className="result-list"><h3><SourceMark />Events <button className="event-add-button" type="button" onClick={() => setSelectionMode(!selectionMode)} aria-pressed={selectionMode} title="Add or remove events from shared scouting data">+</button></h3>{items.length ? items.slice(0, 12).map((item, index) => {
 		const code = textValue(item, ["code", "eventCode"]) || `event-${index}`;
 		const name = textValue(item, ["name", "eventName", "code"]) || "Event";
-		return <label className="event-row" key={code}><SourceMark /><span>{name}</span><input type="checkbox" checked={Boolean(selectedEvents[code])} onChange={(event) => void onSelect(code, name, event.target.checked)} title="Add this FIRST event to shared scouting data" />{selectedEvents[code] && <span className="attribution">added by {selectedEvents[code].displayName}</span>}</label>;
+		return <label className="event-row" key={code}><SourceMark /><span>{name}</span>{selectedEvents[code] && <span className="attribution">added by {selectedEvents[code].displayName}</span>}{selectionMode && <input type="checkbox" checked={Boolean(selectedEvents[code])} onChange={(event) => void onSelect(code, name, event.target.checked)} title="Add this event" />}</label>;
 	}) : <p className="muted">No records returned.</p>}</section>;
 }
 

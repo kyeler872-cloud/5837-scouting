@@ -93,7 +93,7 @@ async function getSelectedEvents(db: D1Database | undefined, teamNumber: string,
 	}
 }
 
-const EDITABLE_FIELDS = new Set(["name", "location", "rookieYear", "notes", "customRating"]);
+const EDITABLE_FIELDS = new Set(["rookieYear", "notes", "customRating"]);
 
 async function fetchFtc<T>(
 	path: string,

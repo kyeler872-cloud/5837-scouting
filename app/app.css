@@ -65,6 +65,8 @@ body {
 .event-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; border-bottom: 1px solid #c9cec4; padding: 0.7rem 0; color: #53625b; cursor: pointer; }
 .event-row .first-mark { width: 0.9rem; height: 0.9rem; }
 .event-row input { margin-left: auto; accent-color: #53625b; }
+.event-add-button { margin-left: 0.5rem; border: 1px solid #849e7e; border-radius: 50%; background: transparent; color: #53625b; cursor: pointer; font: inherit; line-height: 1; width: 1.45rem; height: 1.45rem; }
+.event-add-button[aria-pressed="true"] { background: #17221f; color: #fffaf0; }
 .attribution { color: #849e7e; font-size: 0.7rem; font-weight: 600; }
 .editable-value .attribution { opacity: 1; }
 .result-list .muted { color: #89958d; }
