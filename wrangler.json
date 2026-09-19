@@ -10,5 +10,13 @@
 	"upload_source_maps": true,
 	"vars": {
 		"VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare"
-	}
+	},
+	"d1_databases": [
+		{
+			"binding": "SCOUTING_DB",
+			"database_name": "scouting-data",
+			"database_id": "c490e0d3-969c-4e28-bb5d-2f15ff3b8da8",
+			"migrations_dir": "migrations"
+		}
+	]
 }
