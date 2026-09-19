@@ -9,7 +9,8 @@
 	},
 	"upload_source_maps": true,
 	"vars": {
-		"VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare"
+		"VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare",
+		"FTCSCOUT_GRAPHQL_URL": "https://api.ftcscout.org/graphql"
 	},
 	"d1_databases": [
 		{

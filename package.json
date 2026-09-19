@@ -41,6 +41,8 @@
 		"cf-typegen": "wrangler types && react-router typegen",
 		"check": "tsc && react-router build && wrangler deploy --dry-run",
 		"deploy": "wrangler deploy",
+		"db:migrate:local": "wrangler d1 migrations apply scouting-data --local --config wrangler.json",
+		"db:migrate:remote": "wrangler d1 migrations apply scouting-data --remote",
 		"dev": "react-router dev",
 		"preview": "npm run build && vite preview",
 		"typecheck": "npm run typegen && tsc -b"
