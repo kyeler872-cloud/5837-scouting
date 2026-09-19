@@ -6,14 +6,14 @@ import {
 	Scripts,
 	ScrollRestoration,
 } from "react-router";
-import { ClerkProvider, RedirectToSignIn, Show } from "@clerk/react";
+import { ClerkProvider } from "@clerk/react";
 
 import type { Route } from "./+types/root";
 import "./app.css";
 
 const clerkPublishableKey =
 	import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ??
-	"pk_test_Zmx1ZW50LXdlcmV3b2xmLTEyMjAuY2xlcmsuYWNjb3VudHMuZGV2JA";
+	"pk_live_Y2xlcmsuNTgzNy1zY291dGluZy5reWVsZXJ3MS53b3JrZXJzLmRldiQ";
 
 export const links: Route.LinksFunction = () => [
 	{ rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -49,12 +49,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 export default function App() {
 	return (
 		<ClerkProvider publishableKey={clerkPublishableKey}>
-			<Show when="signed-out">
-				<RedirectToSignIn />
-			</Show>
-			<Show when="signed-in">
-				<Outlet />
-			</Show>
+			<Outlet />
 		</ClerkProvider>
 	);
 }

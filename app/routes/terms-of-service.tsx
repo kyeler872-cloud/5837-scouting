@@ -1,4 +1,5 @@
 import type { Route } from "./+types/terms-of-service";
+import { Protected } from "../protected";
 
 export function meta({}: Route.MetaArgs) {
 	return [
@@ -9,16 +10,17 @@ export function meta({}: Route.MetaArgs) {
 
 export default function TermsOfService() {
 	return (
-		<main className="home-shell">
-			<nav className="topbar" aria-label="Main navigation">
-				<a className="brand" href="/">
-					<span>Scout 5837</span>
-				</a>
-				<a className="terms-link" href="/">Back to home</a>
-			</nav>
-			<article className="terms-page">
-				<h1>Terms of Service</h1>
-				<div className="terms-content">
+		<Protected>
+			<main className="home-shell">
+				<nav className="topbar" aria-label="Main navigation">
+					<a className="brand" href="/home">
+						<span>Scout 5837</span>
+					</a>
+					<a className="terms-link" href="/home">Back to home</a>
+				</nav>
+				<article className="terms-page">
+					<h1>Terms of Service</h1>
+					<div className="terms-content">
 					<p><b>1. Account Usage</b></p>
                        <p> By using this service, you understand that your account, managed through Clerk, may be erased at any time without a given notice. <br></br>
                         By using this service, you are implying that you are currently a member of any team under the Waterloo Robotics umbrella, and anybody that isn't an active member may be terminated from the service.<br></br>
@@ -30,8 +32,9 @@ export default function TermsOfService() {
                     All data maintained through Clerk is subject to Clerk's privacy policy, and not affiliated with this service.<br></br>
                     If you are not gracious and professional, you aren't allowed to use this service 
                     </p>
-				</div>
-			</article>
-		</main>
+					</div>
+				</article>
+			</main>
+		</Protected>
 	);
 }

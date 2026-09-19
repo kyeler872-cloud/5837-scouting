@@ -1,10 +1,4 @@
-@import "tailwindcss" source(".");
-
-@theme {
-	--font-sans:
-		"Inter", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
-		"Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-}
+@import "tailwindcss";
 
 html,
 body {
@@ -12,16 +6,24 @@ body {
 	background: #f2f0ea;
 	color: #17221f;
 	font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
-
-	@media (prefers-color-scheme: dark) {
-		color-scheme: dark;
-	}
 }
 
 .home-shell {
 	min-height: 100vh;
 	background: radial-gradient(circle at 84% 18%, #d7e7c7 0, transparent 28rem), #f2f0ea;
 }
+
+.sign-in-page {
+	min-height: 100vh;
+	display: grid;
+	place-items: center;
+	gap: 1.5rem;
+	padding: 2rem 1.25rem;
+	background: radial-gradient(circle at 50% 0, #d7e7c7 0, transparent 28rem), #f2f0ea;
+}
+.sign-in-brand { align-self: end; color: #17221f; font-size: 0.9rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+.sign-in-page > .cl-rootBox { align-self: start; }
+.auth-loading { min-height: 100vh; background: #f2f0ea; }
 
 .topbar {
 	display: flex;
@@ -50,8 +52,4 @@ body {
 	.button-quiet { display: none; }
 	.terms-link { margin-left: 0; margin-right: 0.5rem; }
 	.progress-message { padding-top: 4rem; }
-
-	@media (prefers-color-scheme: dark) {
-		color-scheme: dark;
-	}
 }
