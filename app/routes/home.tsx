@@ -1,6 +1,6 @@
 // imports for routing, clerk auth, react state, and our protected page wrapper
 import type { Route } from "./+types/home";
-import { Show, UserButton, useAuth } from "@clerk/react";
+import { Show, UserButton, useAuth, useUser, useOrganization } from "@clerk/react";
 import { useState } from "react";
 import { Protected } from "../protected";
 
@@ -96,7 +96,7 @@ export function meta({}: Route.MetaArgs) {
         { name: "description", content: "5837 is the best!" },
     ];
 }
-// meow
+
 // main homepage component that holds state and renders everything
 export default function Home() {
     // clerk auth hook to grab auth token for api calls
@@ -180,7 +180,10 @@ export default function Home() {
                         <span>Scout 5837</span>
                     </a>
                     <Show when="signed-in">
-                        <UserButton />
+                        <div style={{ display: "flex", alignItems: "center" }}>
+                            <UserBadge />
+                            <UserButton />
+                        </div>
                     </Show>
                 </nav>
                 {/* team search form section */}
@@ -234,6 +237,28 @@ export default function Home() {
                 )}
             </main>
         </Protected>
+    );
+}
+
+// renders [First L. · Role] using Clerk user & org data
+function UserBadge() {
+    const { user } = useUser();
+    const { membership } = useOrganization();
+
+    if (!user) return null;
+
+    const firstName = user.firstName ?? "";
+    const lastInitial = user.lastName ? `${user.lastName[0]}.` : "";
+    const formattedName = `${firstName} ${lastInitial}`.trim() || user.username || "User";
+
+    const rawRole = membership?.role ?? "Member";
+    const cleanRole = rawRole.replace(/^org:/, "");
+    const formattedRole = cleanRole.charAt(0).toUpperCase() + cleanRole.slice(1);
+
+    return (
+        <span className="user-badge" style={{ marginRight: "0.75rem", fontWeight: 500 }}>
+            {formattedName} · {formattedRole}
+        </span>
     );
 }
 
