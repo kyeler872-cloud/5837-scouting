@@ -7,6 +7,7 @@ type FtcEnv = Env & {
 	FTC_API_KEY?: string;
 	FTC_API_USERNAME?: string;
 	FTC_API_AUTH?: string;
+	TBA_AUTH_KEY?: string;
 	SCOUTING_DB?: D1Database;
 };
 
@@ -17,7 +18,14 @@ type FtcResponse<T> = {
 };
 
 const FTC_API_BASE = "https://ftc-api.firstinspires.org/v2.0";
+const TBA_API_BASE = "https://www.thebluealliance.com/api/v3";
 const DEFAULT_SEASON = "2025";
+type League = "FTC" | "FRC";
+
+function getLeague(url: URL): League | null {
+	const league = url.searchParams.get("league")?.trim().toUpperCase() || "FTC";
+	return league === "FTC" || league === "FRC" ? league : null;
+}
 
 type RobotEntry = {
 	id: string;
@@ -206,6 +214,34 @@ function averageAllianceScore(matches: Record<string, unknown>[], teamNumber: st
 	};
 }
 
+function averageFrcScore(matches: Record<string, unknown>[], teamKey: string, phase: "autoPoints" | "teleopPoints") {
+	const scores: number[] = [];
+	for (const match of matches) {
+		const alliances = typeof match.alliances === "object" && match.alliances !== null
+			? match.alliances as Record<string, unknown>
+			: {};
+		const breakdown = typeof match.score_breakdown === "object" && match.score_breakdown !== null
+			? match.score_breakdown as Record<string, unknown>
+			: {};
+		for (const color of ["red", "blue"]) {
+			const alliance = typeof alliances[color] === "object" && alliances[color] !== null
+				? alliances[color] as Record<string, unknown>
+				: {};
+			const teams = Array.isArray(alliance.team_keys) ? alliance.team_keys : [];
+			if (!teams.includes(teamKey)) continue;
+			const allianceScore = typeof breakdown[color] === "object" && breakdown[color] !== null
+				? breakdown[color] as Record<string, unknown>
+				: {};
+			const score = allianceScore[phase] ?? allianceScore[phase === "autoPoints" ? "auto_points" : "teleop_points"];
+			if (typeof score === "number" && Number.isFinite(score) && score >= 0) scores.push(score);
+		}
+	}
+	return {
+		average: scores.length ? (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1) : null,
+		matchCount: scores.length,
+	};
+}
+
 function validMonth(value: unknown): value is string {
 	return typeof value === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
 }
@@ -251,12 +287,39 @@ async function fetchFtc<T>(
 	}
 }
 
+async function fetchTba<T>(path: string, authKey: string): Promise<FtcResponse<T>> {
+	try {
+		const response = await fetch(`${TBA_API_BASE}/${path}`, {
+			headers: {
+				Accept: "application/json",
+				"X-TBA-Auth-Key": authKey,
+			},
+			signal: AbortSignal.timeout(10000),
+		});
+		if (!response.ok) {
+			return {
+				data: null,
+				status: response.status,
+				warning: `The Blue Alliance API returned ${response.status} for ${path}`,
+			};
+		}
+		return { data: (await response.json()) as T, status: response.status };
+	} catch (error) {
+		return {
+			data: null,
+			status: 502,
+			warning: `The Blue Alliance API request failed for ${path}: ${error instanceof Error ? error.message : "unknown error"}`,
+		};
+	}
+}
+
 export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const env = context.get(cloudflareContext).env as FtcEnv;
-	const authorization = getFtcAuthorization(env);
 	const teamNumber = params.teamNumber?.trim();
 	const url = new URL(request.url);
 	const season = url.searchParams.get("season")?.trim() || DEFAULT_SEASON;
+	const league = getLeague(url);
+	const tbaAuthKey = env.TBA_AUTH_KEY;
 
 	if (!env.CLERK_SECRET_KEY) {
 		return json({ error: "Server authentication is not configured." }, 503);
@@ -266,76 +329,98 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		return json({ error: "Authentication required." }, 401);
 	}
 
-	if (!authorization) {
+	if (!league) return json({ error: "Choose FTC or FRC." }, 400);
+	if (league === "FTC" && !getFtcAuthorization(env)) {
 		return json({ error: "FTC API credentials are not configured." }, 503);
+	}
+	if (league === "FRC" && !tbaAuthKey) {
+		return json({ error: "The Blue Alliance API key is not configured on the server." }, 503);
 	}
 
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) {
-		return json({ error: "Enter a valid FTC team number." }, 400);
+		return json({ error: `Enter a valid ${league} team number.` }, 400);
 	}
 
-	const encodedTeamNumber = encodeURIComponent(teamNumber);
-	const [team, events, awards] = await Promise.all([
-		fetchFtc<Record<string, unknown>>(
-			`${season}/teams?teamNumber=${encodedTeamNumber}`,
-			authorization,
-		),
-		fetchFtc<Record<string, unknown>>(
-			`${season}/events?teamNumber=${encodedTeamNumber}`,
-			authorization,
-		),
-		fetchFtc<Record<string, unknown>>(
-			`${season}/awards/${encodedTeamNumber}`,
-			authorization,
-		),
-	]);
+	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
+	let teamProfile: Record<string, unknown> | null = null;
+	let eventsData: Record<string, unknown> | Record<string, unknown>[] | null = null;
+	let awardsData: Record<string, unknown> | Record<string, unknown>[] | null = null;
+	let matchesData: Record<string, unknown>[] = [];
+	let warnings: string[] = [];
+	let auto: { average: string | null; matchCount: number };
+	let teleop: { average: string | null; matchCount: number };
 
-	const eventRecords = listFrom<Record<string, unknown>>(events.data, "events");
-	const eventCodes = eventRecords
-		.map((event) => event.code)
-		.filter((code): code is string => typeof code === "string")
-		.slice(0, 20);
-	const matchResponses = await Promise.all(
-		eventCodes.map((eventCode) =>
-			fetchFtc<Record<string, unknown>>(
-				`${season}/matches/${encodeURIComponent(eventCode)}?teamNumber=${encodedTeamNumber}`,
-				authorization,
-			),
-		),
-	);
-	const matches = {
-		matches: matchResponses.flatMap((response) => listFrom<Record<string, unknown>>(response.data, "matches")),
-	};
-
-	const warnings = [team, events, awards, ...matchResponses]
-		.map((result) => result.warning)
-		.filter((warning): warning is string => Boolean(warning));
-
-	if (!team.data && team.status === 404) {
-		return json({ error: `Team ${teamNumber} was not found for season ${season}.` }, 404);
+	if (league === "FTC") {
+		const authorization = getFtcAuthorization(env);
+		if (!authorization) return json({ error: "FTC API credentials are not configured." }, 503);
+		const encodedTeamNumber = encodeURIComponent(teamNumber);
+		const [team, events, awards] = await Promise.all([
+			fetchFtc<Record<string, unknown>>(`${season}/teams?teamNumber=${encodedTeamNumber}`, authorization),
+			fetchFtc<Record<string, unknown>>(`${season}/events?teamNumber=${encodedTeamNumber}`, authorization),
+			fetchFtc<Record<string, unknown>>(`${season}/awards/${encodedTeamNumber}`, authorization),
+		]);
+		const eventRecords = listFrom<Record<string, unknown>>(events.data, "events");
+		const eventCodes = eventRecords
+			.map((event) => event.code)
+			.filter((code): code is string => typeof code === "string")
+			.slice(0, 20);
+		const matchResponses = await Promise.all(eventCodes.map((eventCode) =>
+			fetchFtc<Record<string, unknown>>(`${season}/matches/${encodeURIComponent(eventCode)}?teamNumber=${encodedTeamNumber}`, authorization),
+		));
+		matchesData = matchResponses.flatMap((response) => listFrom<Record<string, unknown>>(response.data, "matches"));
+		warnings = [team, events, awards, ...matchResponses]
+			.map((response) => response.warning)
+			.filter((warning): warning is string => Boolean(warning));
+		if (!team.data && team.status === 404) return json({ error: `FTC team ${teamNumber} was not found for season ${season}.` }, 404);
+		const teamRecords = listFrom<Record<string, unknown>>(team.data, "teams");
+		teamProfile = teamRecords[0] || team.data;
+		eventsData = events.data;
+		awardsData = awards.data;
+		auto = averageAllianceScore(matchesData, teamNumber, "Auto");
+		teleop = averageAllianceScore(matchesData, teamNumber, "Teleop");
+	} else {
+		if (!tbaAuthKey) return json({ error: "The Blue Alliance API key is not configured on the server." }, 503);
+		const teamKey = `frc${teamNumber}`;
+		const encodedTeamKey = encodeURIComponent(teamKey);
+		const year = encodeURIComponent(season);
+		const [team, events, awards, matches] = await Promise.all([
+			fetchTba<Record<string, unknown>>(`team/${encodedTeamKey}`, tbaAuthKey),
+			fetchTba<Record<string, unknown>[]>(`team/${encodedTeamKey}/events/${year}`, tbaAuthKey),
+			fetchTba<Record<string, unknown>[]>(`team/${encodedTeamKey}/awards/${year}`, tbaAuthKey),
+			fetchTba<Record<string, unknown>[]>(`team/${encodedTeamKey}/matches/${year}`, tbaAuthKey),
+		]);
+		if (team.status === 401 || team.status === 403) {
+			return json({ error: "The Blue Alliance rejected the configured API key. Check the TBA_AUTH_KEY Worker secret." }, 503);
+		}
+		if (!team.data && team.status === 404) return json({ error: `FRC team ${teamNumber} was not found.` }, 404);
+		teamProfile = team.data;
+		eventsData = events.data;
+		awardsData = awards.data;
+		matchesData = matches.data || [];
+		warnings = [team, events, awards, matches]
+			.map((response) => response.warning)
+			.filter((warning): warning is string => Boolean(warning));
+		auto = averageFrcScore(matchesData, teamKey, "autoPoints");
+		teleop = averageFrcScore(matchesData, teamKey, "teleopPoints");
 	}
-
-	const teamRecords = listFrom<Record<string, unknown>>(team.data, "teams");
-	const teamProfile = teamRecords[0] || team.data;
-	const auto = averageAllianceScore(matches.matches as Record<string, unknown>[], teamNumber, "Auto");
-	const teleop = averageAllianceScore(matches.matches as Record<string, unknown>[], teamNumber, "Teleop");
 
 	return json({
+		league,
 		teamNumber,
 		season,
 		team: teamProfile,
-		events: events.data,
-		awards: awards.data,
-		matches: matches.data,
-		overrides: await getOverrides(env.SCOUTING_DB, teamNumber, season),
-		selectedEvents: await getSelectedEvents(env.SCOUTING_DB, teamNumber, season),
-		customEvents: await getCustomEvents(env.SCOUTING_DB, teamNumber, season),
+		events: eventsData,
+		awards: awardsData,
+		matches: matchesData,
+		overrides: await getOverrides(env.SCOUTING_DB, dbTeamNumber, season),
+		selectedEvents: await getSelectedEvents(env.SCOUTING_DB, dbTeamNumber, season),
+		customEvents: await getCustomEvents(env.SCOUTING_DB, dbTeamNumber, season),
 		performance: { auto, teleop },
-		robots: await getRobots(env.SCOUTING_DB, teamNumber, season),
+		robots: await getRobots(env.SCOUTING_DB, dbTeamNumber, season),
 		warnings,
 		meta: {
 			fetchedAt: new Date().toISOString(),
-			source: "FIRST Tech Challenge API",
+			source: league === "FTC" ? "FIRST Tech Challenge API" : "The Blue Alliance API v3",
 			editableFields: [...EDITABLE_FIELDS],
 		},
 	});
@@ -346,6 +431,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	const teamNumber = params.teamNumber?.trim();
 	const url = new URL(request.url);
 	const season = url.searchParams.get("season")?.trim() || DEFAULT_SEASON;
+	const league = getLeague(url);
 
 	if (!env.CLERK_SECRET_KEY) return json({ error: "Server authentication is not configured." }, 503);
 	const session = await authenticate(request, env);
@@ -353,7 +439,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if (!env.SCOUTING_DB || typeof env.SCOUTING_DB.prepare !== "function") {
 		return json({ error: "Shared scouting storage is not configured." }, 503);
 	}
-	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: "Enter a valid FTC team number." }, 400);
+	if (!league) return json({ error: "Choose FTC or FRC." }, 400);
+	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: `Enter a valid ${league} team number.` }, 400);
+	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
 
 	let body: { field?: unknown; value?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown };
 	try {
@@ -368,12 +456,12 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		if (body.selected) {
 			await env.SCOUTING_DB.prepare(`INSERT INTO selected_events (team_number, season, event_code, event_name, added_by, added_by_first_name, added_by_last_initial, added_by_account_name)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(team_number, season, event_code) DO NOTHING`)
-				.bind(teamNumber, season, body.eventCode, body.eventName.slice(0, 500), session.sub, identity.firstName, identity.lastInitial, identity.accountName).run();
+				.bind(dbTeamNumber, season, body.eventCode, body.eventName.slice(0, 500), session.sub, identity.firstName, identity.lastInitial, identity.accountName).run();
 		} else {
 			await env.SCOUTING_DB.prepare("DELETE FROM selected_events WHERE team_number = ? AND season = ? AND event_code = ? AND added_by = ?")
-				.bind(teamNumber, season, body.eventCode, session.sub).run();
+				.bind(dbTeamNumber, season, body.eventCode, session.sub).run();
 		}
-		return json({ selectedEvents: await getSelectedEvents(env.SCOUTING_DB, teamNumber, season) });
+		return json({ selectedEvents: await getSelectedEvents(env.SCOUTING_DB, dbTeamNumber, season) });
 	}
 
 	if (body.field === "customEvent") {
@@ -386,11 +474,11 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		try {
 			await env.SCOUTING_DB.prepare(`INSERT INTO custom_events (team_number, season, event_code, event_name, event_date, created_by, created_by_first_name, created_by_last_initial, created_by_account_name)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(team_number, season, event_code) DO UPDATE SET event_name = excluded.event_name, event_date = excluded.event_date`)
-				.bind(teamNumber, season, eventCode, body.eventName.trim(), body.eventDate || null, session.sub, identity.firstName, identity.lastInitial, identity.accountName).run();
+				.bind(dbTeamNumber, season, eventCode, body.eventName.trim(), body.eventDate || null, session.sub, identity.firstName, identity.lastInitial, identity.accountName).run();
 		} catch (error) {
 			return json({ error: `Could not create event: ${error instanceof Error ? error.message : "database error"}` }, 503);
 		}
-		return json({ customEvents: await getCustomEvents(env.SCOUTING_DB, teamNumber, season) });
+		return json({ customEvents: await getCustomEvents(env.SCOUTING_DB, dbTeamNumber, season) });
 	}
 
 	if (body.field === "robot") {
@@ -417,7 +505,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		try {
 			if (typeof body.robotId === "string") {
 				const existing = await env.SCOUTING_DB.prepare("SELECT image_urls FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
-					.bind(body.robotId, teamNumber, season)
+					.bind(body.robotId, dbTeamNumber, season)
 					.first<{ image_urls: string }>();
 				if (!existing) return json({ error: "Robot entry not found." }, 404);
 				const existingImages = parseRobotImages(existing.image_urls);
@@ -436,19 +524,19 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 				const result = await env.SCOUTING_DB.prepare(`UPDATE robot_entries
 					SET name = ?, description = ?, image_urls = ?, start_month = ?, end_month = ?
 					WHERE id = ? AND team_number = ? AND season = ?`)
-					.bind(body.robotName.trim(), body.description.trim(), JSON.stringify(images), body.startMonth, endMonth, body.robotId, teamNumber, season)
+					.bind(body.robotName.trim(), body.description.trim(), JSON.stringify(images), body.startMonth, endMonth, body.robotId, dbTeamNumber, season)
 					.run();
 				if (!result.meta.changes) return json({ error: "Robot entry not found." }, 404);
 			} else {
 				await env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month)
 					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-					.bind(crypto.randomUUID(), teamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify([]), body.startMonth, endMonth)
+					.bind(crypto.randomUUID(), dbTeamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify([]), body.startMonth, endMonth)
 					.run();
 			}
 		} catch (error) {
 			return json({ error: `Could not ${body.robotId ? "update" : "save"} robot: ${error instanceof Error ? error.message : "database error"}` }, 503);
 		}
-		return json({ robots: await getRobots(env.SCOUTING_DB, teamNumber, season) });
+		return json({ robots: await getRobots(env.SCOUTING_DB, dbTeamNumber, season) });
 	}
 
 	if (typeof body.field !== "string" || !EDITABLE_FIELDS.has(body.field) || typeof body.value !== "string" || body.value.length > 500) {
@@ -461,11 +549,11 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			.prepare(`INSERT INTO team_overrides (team_number, season, field, value, updated_by, updated_by_first_name, updated_by_last_initial, updated_by_account_name, updated_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(team_number, season, field) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_by_first_name = excluded.updated_by_first_name, updated_by_last_initial = excluded.updated_by_last_initial, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-			.bind(teamNumber, season, body.field, body.value.trim(), session.sub, identity.firstName, identity.lastInitial, identity.accountName)
+			.bind(dbTeamNumber, season, body.field, body.value.trim(), session.sub, identity.firstName, identity.lastInitial, identity.accountName)
 			.run();
 	} catch (error) {
 		return json({ error: `Could not save edit: ${error instanceof Error ? error.message : "database error"}` }, 503);
 	}
 
-	return json({ overrides: await getOverrides(env.SCOUTING_DB, teamNumber, season) });
+	return json({ overrides: await getOverrides(env.SCOUTING_DB, dbTeamNumber, season) });
 }

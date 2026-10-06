@@ -1,6 +1,6 @@
-In progress scouting tool for FTC, and later FRC :3
+In progress scouting tool for FTC and FRC.
 
-Latest news: FTC API works, and the database is set up! Working on user-friendly things now :D
+FTC data comes from the FIRST Tech Challenge API; FRC team, event, award, and match data comes from The Blue Alliance API v3.
 
 ---
 
@@ -22,3 +22,23 @@ CLERK_SECRET_KEY=sk_test_replace_with_your_key
 
 Do not commit `.dev.vars` or expose the secret key. Restart the development
 server after changing local variables.
+
+## The Blue Alliance configuration
+
+FRC lookups use The Blue Alliance API v3. Add your read API key as a Worker
+secret named `TBA_AUTH_KEY`:
+
+```sh
+npx wrangler secret put TBA_AUTH_KEY
+```
+
+For local development, add `TBA_AUTH_KEY=your_read_api_key` to the ignored
+`.dev.vars` file. Keep this key server-side; the app sends it to The Blue
+Alliance in the `X-TBA-Auth-Key` header and never exposes it to the browser.
+
+FRC lookups use the team, season-events, season-awards, and season-matches
+endpoints. The Auto and TeleOp averages are calculated from each played match's
+alliance score breakdown. The Blue Alliance asks applications to identify
+their data source, so FRC team pages include a powered-by attribution link.
+See [The Blue Alliance API documentation](https://www.thebluealliance.com/apidocs)
+and [API v3 specification](https://www.thebluealliance.com/swagger/api_v3.json).

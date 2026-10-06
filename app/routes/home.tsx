@@ -9,6 +9,7 @@ type JsonRecord = Record<string, unknown>;
 
 // type setup so typescript knows what the team search api response looks like
 type TeamLookupResponse = {
+    league: "FTC" | "FRC";
     teamNumber: string;
     season: string;
     team: JsonRecord | null;
@@ -84,15 +85,20 @@ function formatEventDate(date: string) {
 
 // formats start and end dates for an event into a single string
 function firstEventDate(event: JsonRecord) {
-    const start = textValue(event, ["dateStart"]);
-    const end = textValue(event, ["dateEnd"]);
+    const start = textValue(event, ["dateStart", "start_date"]);
+    const end = textValue(event, ["dateEnd", "end_date"]);
     if (!start && !end) return "Date unavailable";
     if (!end || end === start) return formatEventDate(start || end || "");
     return `${formatEventDate(start || end || "")} - ${formatEventDate(end)}`;
 }
 
-// seasonies 
-const seasons = [2026, 2025, 2024, 2023, 2022, 2021, 2020];
+const ftcSeasons = [2026, 2025, 2024, 2023, 2022, 2021, 2020];
+const frcSeasons = Array.from({ length: 2026 - 1992 + 1 }, (_, index) => 2026 - index);
+
+function teamApiUrl(teamNumber: string, season: string, league: "FTC" | "FRC") {
+    const search = new URLSearchParams({ season, league: league.toLowerCase() });
+    return `/api/teams/${encodeURIComponent(teamNumber)}?${search}`;
+}
 
 // page title and metadata for the browser tab
 export function meta({}: Route.MetaArgs) {
@@ -108,6 +114,7 @@ export default function Home() {
     const { getToken } = useAuth();
     // react state hooks for tracking search inputs, team data results, errors, and loading state
     const [teamNumber, setTeamNumber] = useState("");
+    const [league, setLeague] = useState<"FTC" | "FRC">("FTC");
     const [season, setSeason] = useState("2025");
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
     const [error, setError] = useState("");
@@ -135,7 +142,7 @@ export default function Home() {
         const normalizedTeamNumber = teamNumber.trim();
         // check if team number is valid 1-6 digits
         if (!/^\d{1,6}$/.test(normalizedTeamNumber)) {
-            setError("Enter a valid FTC team number.");
+            setError(`Enter a valid ${league} team number.`);
             return;
         }
 
@@ -145,7 +152,7 @@ export default function Home() {
         setIsSearching(true);
         try {
             const token = await getToken();
-            const response = await fetch(`/api/teams/${normalizedTeamNumber}?season=${season}`, {
+            const response = await fetch(teamApiUrl(normalizedTeamNumber, season, league), {
                 headers: token ? { Authorization: `Bearer ${token}` } : undefined,
             });
             const data = await readResponse<TeamLookupResponse | { error?: string }>(response);
@@ -163,7 +170,7 @@ export default function Home() {
         try {
             if (!result) return;
             const token = await getToken();
-            const response = await fetch(`/api/teams/${result.teamNumber}?season=${result.season}`, { method: "PUT", headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ field, value }) });
+            const response = await fetch(teamApiUrl(result.teamNumber, result.season, result.league), { method: "PUT", headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ field, value }) });
             const data = await readResponse<{ overrides?: TeamLookupResponse["overrides"]; error?: string }>(response);
             if (!response.ok) throw new Error(data.error || "Could not save edit.");
             setResult({ ...result, overrides: data.overrides || result.overrides });
@@ -177,7 +184,7 @@ export default function Home() {
     async function createEvent(eventName: string, eventDate: string) {
         if (!result) return;
         const token = await getToken();
-        const response = await fetch(`/api/teams/${result.teamNumber}?season=${result.season}`, {
+        const response = await fetch(teamApiUrl(result.teamNumber, result.season, result.league), {
             method: "PUT",
             headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
             body: JSON.stringify({ field: "customEvent", eventName, eventDate: eventDate || null }),
@@ -196,7 +203,7 @@ export default function Home() {
         if (!result) return;
         try {
             const token = await getToken();
-            const response = await fetch(`/api/teams/${result.teamNumber}?season=${result.season}`, {
+            const response = await fetch(teamApiUrl(result.teamNumber, result.season, result.league), {
                 method: "PUT",
                 headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
                 body: JSON.stringify({
@@ -234,14 +241,18 @@ export default function Home() {
                 </nav>
                 {/* team search form section */}
                 <section className="scouting-search" aria-labelledby="scouting-title">
-                    <p className="section-kicker">FIRST Tech Challenge</p>
+                    <p className="section-kicker">FIRST Robotics Scouting</p>
                     <h1 id="scouting-title">search for a team!</h1>
-                    <p className="search-intro">Search the FIRST API for a team profile, events, awards, and performance data.</p>
+                    <p className="search-intro">Search team profiles, event history, awards, and match performance.</p>
                     <form className="team-search" onSubmit={searchTeam}>
                         <div className="search-options">
-                            <div><label htmlFor="team-number">FTC team number</label><input id="team-number" inputMode="numeric" pattern="[0-9]*" placeholder="5837" value={teamNumber} onChange={(event) => setTeamNumber(event.target.value)} /></div>
-                            <div><label htmlFor="season">FTC season</label><select id="season" value={season} onChange={(event) => setSeason(event.target.value)}>{seasons.map((year) => <option key={year} value={year}>{year}-{String(year + 1).slice(-2)}</option>)}</select></div>
+                            <div><label htmlFor="league">Program</label><select id="league" value={league} onChange={(event) => setLeague(event.target.value as "FTC" | "FRC")}>
+                                <option value="FTC">FTC</option>
+                                <option value="FRC">FRC</option>
+                            </select></div>
+                            <div><label htmlFor="season">Season</label><select id="season" value={season} onChange={(event) => setSeason(event.target.value)}>{(league === "FTC" ? ftcSeasons : frcSeasons).map((year) => <option key={year} value={year}>{year}-{String(year + 1).slice(-2)}</option>)}</select></div>
                         </div>
+                        <div className="team-number-field"><label htmlFor="team-number">{league} team number</label><input id="team-number" inputMode="numeric" pattern="[0-9]*" placeholder={league === "FTC" ? "7247" : "5837"} value={teamNumber} onChange={(event) => setTeamNumber(event.target.value)} /></div>
                         <div className="search-row">
                             <button className="search-button" type="submit" disabled={isSearching}>{isSearching ? "Searching..." : "Search"}</button>
                         </div>
@@ -254,16 +265,16 @@ export default function Home() {
                         {/* team heading with name, location, logo */}
                         <header className="team-heading">
                             <div>
-                                <p className="section-kicker">Team {result.teamNumber} / {result.season} season</p>
-                                <h2>{textValue(result.team, ["nameLong", "nameShort", "name"]) || `Team ${result.teamNumber}`}</h2>
-                                <p>{[textValue(result.team, ["city"]), textValue(result.team, ["state"]), textValue(result.team, ["country"])].filter(Boolean).join(", ") || "Location unavailable"}</p>
+                                <p className="section-kicker">{result.league} team {result.teamNumber} / {result.season} season</p>
+                                <h2>{textValue(result.team, ["nameLong", "nameShort", "nickname", "name"]) || `Team ${result.teamNumber}`}</h2>
+                                <p>{[textValue(result.team, ["city"]), textValue(result.team, ["state", "state_prov"]), textValue(result.team, ["country"])].filter(Boolean).join(", ") || "Location unavailable"}</p>
                             </div>
                             {(() => { const logo = textValue(result.team, ["logo", "logoUrl", "teamLogo"]); return logo ? <img className="team-logo" src={logo} alt="Team logo" /> : null; })()}
                         </header>
                         <div className="team-facts">
-                            <div><span>Rookie year</span><strong>{textValue(result.team, ["rookieYear"]) || "Unavailable"}</strong></div>
-                            <div><span>Events</span><SourceMark /><strong>{records(result.events).length || "None listed"}</strong></div>
-                            <div><span>Awards</span><SourceMark /><strong>{records(result.awards).length || "None listed"}</strong></div>
+                            <div><span>Rookie year</span><strong>{textValue(result.team, ["rookieYear", "rookie_year"]) || "Unavailable"}</strong></div>
+                            <div><span>Events</span><SourceMark league={result.league} /><strong>{records(result.events).length || "None listed"}</strong></div>
+                            <div><span>Awards</span><SourceMark league={result.league} /><strong>{records(result.awards).length || "None listed"}</strong></div>
                         </div>
                         <div className="team-sections-layout">
                             <aside className="section-sidebar" aria-label="Team page sections">
@@ -286,18 +297,20 @@ export default function Home() {
                                 <PerformanceSection
                                     id="auto"
                                     title="Auto"
-                                    description="Average autonomous points per match from FIRST event results."
+                                    description={`Average autonomous points per match from ${result.league === "FTC" ? "FIRST" : "The Blue Alliance"} event results.`}
                                     score={result.performance.auto.average}
                                     matchCount={result.performance.auto.matchCount}
+                                    league={result.league}
                                     note={result.overrides.autoNotes}
                                     onSave={saveOverride}
                                 />
                                 <PerformanceSection
                                     id="teleop"
                                     title="TeleOp"
-                                    description="Average teleoperated points per match from FIRST event results."
+                                    description={`Average teleoperated points per match from ${result.league === "FTC" ? "FIRST" : "The Blue Alliance"} event results.`}
                                     score={result.performance.teleop.average}
                                     matchCount={result.performance.teleop.matchCount}
+                                    league={result.league}
                                     note={result.overrides.teleopNotes}
                                     onSave={saveOverride}
                                 />
@@ -306,8 +319,8 @@ export default function Home() {
                                     <details className="events-awards" open>
                                         <summary>Events and awards</summary>
                                         <div className="result-columns">
-                                            <EventList items={records(result.events)} customEvents={result.customEvents} onCreate={createEvent} />
-                                            <ResultList title="Awards" items={records(result.awards)} primaryKeys={["name", "awardName", "eventName"]} />
+                                            <EventList league={result.league} items={records(result.events)} customEvents={result.customEvents} onCreate={createEvent} />
+                                            <ResultList league={result.league} title="Awards" items={records(result.awards)} primaryKeys={["name", "awardName", "eventName"]} />
                                         </div>
                                     </details>
                                 </section>
@@ -317,7 +330,8 @@ export default function Home() {
                                 </section>
                             </div>
                         </div>
-                        {result.warnings.length > 0 && <p className="lookup-warning">Some FIRST data was unavailable: {result.warnings.join("; ")}</p>}
+                        {result.league === "FRC" && <p className="data-attribution">FRC data powered by <a href="https://www.thebluealliance.com" target="_blank" rel="noreferrer">The Blue Alliance</a>.</p>}
+                        {result.warnings.length > 0 && <p className="lookup-warning">Some {result.league} data was unavailable: {result.warnings.join("; ")}</p>}
                     </section>
                 )}
             </main>
@@ -351,12 +365,13 @@ function SectionHeading({ eyebrow, title }: { eyebrow: string; title: string }) 
     return <header className="team-section-heading"><p className="section-kicker">{eyebrow}</p><h3>{title}</h3></header>;
 }
 
-function PerformanceSection({ id, title, description, score, matchCount, note, onSave }: {
+function PerformanceSection({ id, title, description, score, matchCount, league, note, onSave }: {
     id: string;
     title: string;
     description: string;
     score: string | null;
     matchCount: number;
+    league: "FTC" | "FRC";
     note?: { value: string; displayName: string };
     onSave: (field: string, value: string) => Promise<void>;
 }) {
@@ -366,7 +381,7 @@ function PerformanceSection({ id, title, description, score, matchCount, note, o
             <SectionHeading eyebrow="FIRST match data" title={title} />
             <div className="performance-card">
                 <div className="performance-score"><span>Average points per match</span><strong>{score ?? "—"}</strong></div>
-                <p><SourceMark />{matchCount ? `Based on ${matchCount} scored ${matchCount === 1 ? "match" : "matches"}.` : "No scored matches were returned for this team."}</p>
+                <p><SourceMark league={league} />{matchCount ? `Based on ${matchCount} scored ${matchCount === 1 ? "match" : "matches"}.` : "No scored matches were returned for this team."}</p>
             </div>
             <div className="custom-notes">
                 <span>{title} notes</span>
@@ -655,28 +670,30 @@ function formatMonth(value: string) {
 }
 
 // little icon component to mark official first data
-function SourceMark() {
-    return <img className="first-mark" src="/first.png" alt="From FIRST" title="Data from FIRST" />;
+function SourceMark({ league = "FTC" }: { league?: "FTC" | "FRC" }) {
+    return league === "FRC"
+        ? <a className="tba-source-mark" href="https://www.thebluealliance.com" target="_blank" rel="noreferrer" aria-label="Data from The Blue Alliance">TBA</a>
+        : <img className="first-mark" src="/first.png" alt="From FIRST" title="Data from FIRST" />;
 }
 
 // generic list component to render lists like awards
-function ResultList({ title, items, primaryKeys, firstSource = false }: { title: string; items: JsonRecord[]; primaryKeys: string[]; firstSource?: boolean }) {
+function ResultList({ title, items, primaryKeys, league, firstSource = true }: { title: string; items: JsonRecord[]; primaryKeys: string[]; league: "FTC" | "FRC"; firstSource?: boolean }) {
     return (
         <section className="result-list">
-            <h3>{firstSource && <SourceMark />}{title}</h3>
-            {items.length ? items.slice(0, 12).map((item, index) => <p key={`${title}-${index}`}>{firstSource && <SourceMark />}{textValue(item, primaryKeys) || "Record available"}</p>) : <p className="muted">No records returned.</p>}
+            <h3>{firstSource && <SourceMark league={league} />}{title}</h3>
+            {items.length ? items.slice(0, 12).map((item, index) => <p key={`${title}-${index}`}>{firstSource && <SourceMark league={league} />}{textValue(item, primaryKeys) || "Record available"}</p>) : <p className="muted">No records returned.</p>}
         </section>
     );
 }
 
 // renders event lists and form to create custom events
-function EventList({ items, customEvents, onCreate }: { items: JsonRecord[]; customEvents: TeamLookupResponse["customEvents"]; onCreate: (name: string, date: string) => Promise<void> }) {
+function EventList({ league, items, customEvents, onCreate }: { league: "FTC" | "FRC"; items: JsonRecord[]; customEvents: TeamLookupResponse["customEvents"]; onCreate: (name: string, date: string) => Promise<void> }) {
     const [creating, setCreating] = useState(false);
     const [name, setName] = useState("");
     const [date, setDate] = useState("");
-    return <section className="result-list"><h3><SourceMark />Events <button className="event-add-button" type="button" onClick={() => setCreating(!creating)} aria-expanded={creating} title="Create a new event">+</button></h3>
+    return <section className="result-list"><h3><SourceMark league={league} />Events <button className="event-add-button" type="button" onClick={() => setCreating(!creating)} aria-expanded={creating} title="Create a new event">+</button></h3>
         {creating && <form className="new-event-form" onSubmit={(event) => { event.preventDefault(); void onCreate(name, date).then(() => { setName(""); setDate(""); setCreating(false); }); }}><input aria-label="Event name" placeholder="New event name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Event date" type="date" value={date} onChange={(event) => setDate(event.target.value)} /><button type="submit">Create</button></form>}
-        {items.length ? items.slice(0, 12).map((item, index) => <p className="event-row" key={`first-${index}`}><SourceMark /><span>{textValue(item, ["name", "eventName", "code"]) || "Event"}</span><strong className="custom-event-date">{firstEventDate(item)}</strong></p>) : <p className="muted">No FIRST events returned.</p>}
+        {items.length ? items.slice(0, 12).map((item, index) => <p className="event-row" key={`first-${index}`}><SourceMark league={league} /><span>{textValue(item, ["name", "eventName", "code", "key"]) || "Event"}</span><strong className="custom-event-date">{firstEventDate(item)}</strong></p>) : <p className="muted">No {league} events returned.</p>}
         {customEvents.map((event) => <p className="event-row custom-event" key={event.code}><span>{event.name}</span><strong className="custom-event-date">{event.date ? formatEventDate(event.date) : "Date unavailable"}</strong><span className="attribution">{event.displayName}</span></p>)}
     </section>;
 }
