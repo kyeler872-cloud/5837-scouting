@@ -1,6 +1,6 @@
 // imports for routing, clerk auth, react state, and our protected page wrapper
 import type { Route } from "./+types/home";
-import { Show, UserButton, useAuth, useUser, useOrganization } from "@clerk/react";
+import { UserButton, useAuth, useUser, useOrganization } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import { Protected } from "../protected";
 
@@ -219,12 +219,10 @@ export default function Home() {
                     <a className="brand" href="/home">
                         <span>Scout 5837</span>
                     </a>
-                    <Show when="signed-in">
-                        <div style={{ display: "flex", alignItems: "center" }}>
-                            <UserBadge />
-                            <UserButton />
-                        </div>
-                    </Show>
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                        <UserBadge />
+                        <UserButton />
+                    </div>
                 </nav>
                 {/* team search form section */}
                 <section className="scouting-search" aria-labelledby="scouting-title">

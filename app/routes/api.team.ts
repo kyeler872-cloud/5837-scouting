@@ -1,5 +1,6 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.team";
+import { cloudflareContext } from "../cloudflare-context";
 
 type FtcEnv = Env & {
 	CLERK_SECRET_KEY?: string;
@@ -219,7 +220,7 @@ async function fetchFtc<T>(
 }
 
 export async function loader({ request, params, context }: Route.LoaderArgs) {
-	const env = context.cloudflare.env as FtcEnv;
+	const env = context.get(cloudflareContext).env as FtcEnv;
 	const authorization = getFtcAuthorization(env);
 	const teamNumber = params.teamNumber?.trim();
 	const url = new URL(request.url);
@@ -309,7 +310,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 }
 
 export async function action({ request, params, context }: Route.ActionArgs) {
-	const env = context.cloudflare.env as FtcEnv;
+	const env = context.get(cloudflareContext).env as FtcEnv;
 	const teamNumber = params.teamNumber?.trim();
 	const url = new URL(request.url);
 	const season = url.searchParams.get("season")?.trim() || DEFAULT_SEASON;

@@ -1,4 +1,4 @@
-import { SignIn } from "@clerk/react";
+import { SignIn } from "@clerk/react-router";
 import type { Route } from "./+types/sign-in";
 
 export function meta({}: Route.MetaArgs) {

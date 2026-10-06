@@ -6,14 +6,20 @@ import {
 	Scripts,
 	ScrollRestoration,
 } from "react-router";
-import { ClerkProvider } from "@clerk/react";
+import { ClerkProvider } from "@clerk/react-router";
+import { clerkMiddleware } from "@clerk/react-router/server";
+import { rootAuthLoader } from "@clerk/react-router/ssr.server";
 
 import type { Route } from "./+types/root";
 import "./app.css";
 
 const clerkPublishableKey =
-	import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ??
+	import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ||
 	"pk_live_Y2xlcmsuNTgzNy1zY291dGluZy5reWVsZXJ3MS53b3JrZXJzLmRldiQ";
+
+export const middleware: Route.MiddlewareFunction[] = [
+	clerkMiddleware({ publishableKey: clerkPublishableKey }),
+];
 
 export const links: Route.LinksFunction = () => [
 	{ rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -27,6 +33,10 @@ export const links: Route.LinksFunction = () => [
 		href: "https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap",
 	},
 ];
+
+export async function loader(args: Route.LoaderArgs) {
+	return rootAuthLoader(args);
+}
 
 export function Layout({ children }: { children: React.ReactNode }) {
 	return (
@@ -46,9 +56,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
 	);
 }
 
-export default function App() {
+export default function App({ loaderData }: Route.ComponentProps) {
 	return (
-		<ClerkProvider publishableKey={clerkPublishableKey}>
+		<ClerkProvider publishableKey={clerkPublishableKey} loaderData={loaderData}>
 			<Outlet />
 		</ClerkProvider>
 	);
