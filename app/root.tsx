@@ -13,13 +13,7 @@ import { rootAuthLoader } from "@clerk/react-router/ssr.server";
 import type { Route } from "./+types/root";
 import "./app.css";
 
-const clerkPublishableKey =
-	import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ||
-	"pk_live_Y2xlcmsuNTgzNy1zY291dGluZy5reWVsZXJ3MS53b3JrZXJzLmRldiQ";
-
-export const middleware: Route.MiddlewareFunction[] = [
-	clerkMiddleware({ publishableKey: clerkPublishableKey }),
-];
+export const middleware: Route.MiddlewareFunction[] = [clerkMiddleware()];
 
 export const links: Route.LinksFunction = () => [
 	{ rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -58,7 +52,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
 export default function App({ loaderData }: Route.ComponentProps) {
 	return (
-		<ClerkProvider publishableKey={clerkPublishableKey} loaderData={loaderData}>
+		<ClerkProvider
+			loaderData={loaderData}
+			signInFallbackRedirectUrl="/home"
+			signUpFallbackRedirectUrl="/home"
+		>
 			<Outlet />
 		</ClerkProvider>
 	);

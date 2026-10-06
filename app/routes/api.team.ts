@@ -23,10 +23,42 @@ type RobotEntry = {
 	id: string;
 	name: string;
 	description: string;
-	imageUrls: string[];
+	imageUrls: RobotImage[];
 	startMonth: string;
 	endMonth: string | null;
 };
+
+type RobotImage = {
+	id: string;
+	url: string;
+	addedBy: string | null;
+	displayName: string;
+};
+
+function parseRobotImages(value: string): RobotImage[] {
+	const parsed: unknown = JSON.parse(value);
+	if (!Array.isArray(parsed)) throw new Error("Robot image data is invalid.");
+	return parsed.map((image: unknown, index): RobotImage => {
+		if (typeof image === "string") {
+			return { id: `legacy-${index}`, url: image, addedBy: null, displayName: "Contributor unavailable" };
+		}
+		if (
+			typeof image === "object" &&
+			image !== null &&
+			"id" in image &&
+			typeof image.id === "string" &&
+			"url" in image &&
+			typeof image.url === "string"
+		) {
+			const addedBy = "addedBy" in image && typeof image.addedBy === "string" ? image.addedBy : null;
+			const displayName = "displayName" in image && typeof image.displayName === "string"
+				? image.displayName
+				: "Contributor unavailable";
+			return { id: image.id, url: image.url, addedBy, displayName };
+		}
+		throw new Error("Robot image data is invalid.");
+	});
+}
 
 function listFrom<T>(value: Record<string, unknown> | null, key: string): T[] {
 	if (!value) return [];
@@ -130,7 +162,7 @@ async function getRobots(db: D1Database | undefined, teamNumber: string, season:
 			id: row.id,
 			name: row.name,
 			description: row.description,
-			imageUrls: JSON.parse(row.image_urls) as string[],
+			imageUrls: parseRobotImages(row.image_urls),
 			startMonth: row.start_month,
 			endMonth: row.end_month,
 		}));
@@ -323,7 +355,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	}
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: "Enter a valid FTC team number." }, 400);
 
-	let body: { field?: unknown; value?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown };
+	let body: { field?: unknown; value?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown };
 	try {
 		body = (await request.json()) as { field?: unknown; value?: unknown };
 	} catch {
@@ -362,21 +394,59 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	}
 
 	if (body.field === "robot") {
+		if (body.robotId !== undefined && (typeof body.robotId !== "string" || !body.robotId || body.robotId.length > 100)) return json({ error: "Invalid robot entry." }, 400);
 		if (typeof body.robotName !== "string" || !body.robotName.trim() || body.robotName.trim().length > 120) return json({ error: "Enter a robot name (up to 120 characters)." }, 400);
 		if (typeof body.description !== "string" || body.description.length > 2000) return json({ error: "Robot description must be 2,000 characters or fewer." }, 400);
 		if (!validMonth(body.startMonth)) return json({ error: "Choose a valid robot start month." }, 400);
 		if (body.endMonth !== null && body.endMonth !== "" && !validMonth(body.endMonth)) return json({ error: "Choose a valid robot end month." }, 400);
 		const endMonth = typeof body.endMonth === "string" && body.endMonth ? body.endMonth : null;
 		if (endMonth && endMonth < body.startMonth) return json({ error: "Robot end month cannot be before its start month." }, 400);
-		if (!Array.isArray(body.imageUrls) || body.imageUrls.length > 8 || !body.imageUrls.every(validImageUrl)) return json({ error: "Add up to 8 valid image URLs using http or https." }, 400);
+		if (!Array.isArray(body.imageUrls) || body.imageUrls.length > 8 || !body.imageUrls.every((image) =>
+			typeof image === "object" &&
+			image !== null &&
+			"id" in image &&
+			typeof image.id === "string" &&
+			image.id.length > 0 &&
+			image.id.length <= 100 &&
+			"url" in image &&
+			validImageUrl(image.url)
+		)) return json({ error: "Add up to 8 valid image URLs using http or https." }, 400);
+		const submittedImages = body.imageUrls as { id: string; url: string }[];
+		if (new Set(submittedImages.map((image) => image.id)).size !== submittedImages.length) return json({ error: "Robot photos must have unique IDs." }, 400);
 
 		try {
-			await env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-				.bind(crypto.randomUUID(), teamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify(body.imageUrls), body.startMonth, endMonth)
-				.run();
+			if (typeof body.robotId === "string") {
+				const existing = await env.SCOUTING_DB.prepare("SELECT image_urls FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
+					.bind(body.robotId, teamNumber, season)
+					.first<{ image_urls: string }>();
+				if (!existing) return json({ error: "Robot entry not found." }, 404);
+				const existingImages = parseRobotImages(existing.image_urls);
+				const existingById = new Map(existingImages.map((image) => [image.id, image]));
+				const identity = await getUserIdentity(env, session.sub);
+				const images: RobotImage[] = submittedImages.map((image) => {
+					const savedImage = existingById.get(image.id);
+					if (savedImage) return { ...savedImage, url: image.url };
+					return {
+						id: image.id,
+						url: image.url,
+						addedBy: session.sub,
+						displayName: identity.accountName,
+					};
+				});
+				const result = await env.SCOUTING_DB.prepare(`UPDATE robot_entries
+					SET name = ?, description = ?, image_urls = ?, start_month = ?, end_month = ?
+					WHERE id = ? AND team_number = ? AND season = ?`)
+					.bind(body.robotName.trim(), body.description.trim(), JSON.stringify(images), body.startMonth, endMonth, body.robotId, teamNumber, season)
+					.run();
+				if (!result.meta.changes) return json({ error: "Robot entry not found." }, 404);
+			} else {
+				await env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+					.bind(crypto.randomUUID(), teamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify([]), body.startMonth, endMonth)
+					.run();
+			}
 		} catch (error) {
-			return json({ error: `Could not save robot: ${error instanceof Error ? error.message : "database error"}` }, 503);
+			return json({ error: `Could not ${body.robotId ? "update" : "save"} robot: ${error instanceof Error ? error.message : "database error"}` }, 503);
 		}
 		return json({ robots: await getRobots(env.SCOUTING_DB, teamNumber, season) });
 	}

@@ -1,7 +1,7 @@
 // imports for routing, clerk auth, react state, and our protected page wrapper
 import type { Route } from "./+types/home";
 import { UserButton, useAuth, useUser, useOrganization } from "@clerk/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Protected } from "../protected";
 
 // quick type definition for generic json objects from api
@@ -28,9 +28,16 @@ type RobotEntry = {
     id: string;
     name: string;
     description: string;
-    imageUrls: string[];
+    imageUrls: RobotImage[];
     startMonth: string;
     endMonth: string | null;
+};
+
+type RobotImage = {
+    id: string;
+    url: string;
+    addedBy: string | null;
+    displayName: string;
 };
 
 // helper to grab a text or number string out of a json object using a list of key names
@@ -185,7 +192,7 @@ export default function Home() {
         }
     }
 
-    async function createRobot(robot: Omit<RobotEntry, "id">) {
+    async function saveRobot(robot: Omit<RobotEntry, "id">, robotId?: string) {
         if (!result) return;
         try {
             const token = await getToken();
@@ -194,9 +201,10 @@ export default function Home() {
                 headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
                 body: JSON.stringify({
                     field: "robot",
+                    robotId,
                     robotName: robot.name,
                     description: robot.description,
-                    imageUrls: robot.imageUrls,
+                    imageUrls: robot.imageUrls.map(({ id, url }) => ({ id, url })),
                     startMonth: robot.startMonth,
                     endMonth: robot.endMonth,
                 }),
@@ -305,7 +313,7 @@ export default function Home() {
                                 </section>
                                 <section className="team-section" id="robot">
                                     <SectionHeading eyebrow="Build history" title="Robot" />
-                                    <RobotSection robots={result.robots} onCreate={createRobot} />
+                                    <RobotSection robots={result.robots} onSave={saveRobot} />
                                 </section>
                             </div>
                         </div>
@@ -369,11 +377,14 @@ function PerformanceSection({ id, title, description, score, matchCount, note, o
     );
 }
 
-function RobotSection({ robots, onCreate }: { robots: RobotEntry[]; onCreate: (robot: Omit<RobotEntry, "id">) => Promise<void> }) {
+function RobotSection({ robots, onSave }: {
+    robots: RobotEntry[];
+    onSave: (robot: Omit<RobotEntry, "id">, robotId?: string) => Promise<void>;
+}) {
     const [creating, setCreating] = useState(false);
+    const [editingRobot, setEditingRobot] = useState<RobotEntry | null>(null);
     const [name, setName] = useState("");
     const [description, setDescription] = useState("");
-    const [imageLinks, setImageLinks] = useState("");
     const [startMonth, setStartMonth] = useState("");
     const [endMonth, setEndMonth] = useState("");
     const [saving, setSaving] = useState(false);
@@ -381,21 +392,39 @@ function RobotSection({ robots, onCreate }: { robots: RobotEntry[]; onCreate: (r
     const currentRobots = robots.filter((robot) => !robot.endMonth);
     const obsoleteRobots = robots.filter((robot) => Boolean(robot.endMonth));
 
+    function openCreateForm() {
+        setEditingRobot(null);
+        setName("");
+        setDescription("");
+        setStartMonth("");
+        setEndMonth("");
+        setFormError("");
+        setCreating(true);
+    }
+
+    function openEditForm(robot: RobotEntry) {
+        setEditingRobot(robot);
+    }
+
+    function closeCreateForm() {
+        setCreating(false);
+        setFormError("");
+    }
+
     async function submitRobot(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
         setSaving(true);
         setFormError("");
         try {
-            await onCreate({
+            await onSave({
                 name,
                 description,
-                imageUrls: imageLinks.split(/\r?\n/).map((link) => link.trim()).filter(Boolean),
+                imageUrls: [],
                 startMonth,
                 endMonth: endMonth || null,
             });
             setName("");
             setDescription("");
-            setImageLinks("");
             setStartMonth("");
             setEndMonth("");
             setCreating(false);
@@ -408,51 +437,216 @@ function RobotSection({ robots, onCreate }: { robots: RobotEntry[]; onCreate: (r
 
     return (
         <div className="robot-section-content">
-            <p className="section-description">A manually maintained timeline of the team’s robot designs.</p>
+            <p className="section-description">This team's past robot designs (This data is manually added):</p>
             {currentRobots.length > 0
-                ? <div className="robot-grid">{currentRobots.map((robot) => <RobotCard key={robot.id} robot={robot} />)}</div>
+                ? <div className="robot-grid">{currentRobots.map((robot) => <RobotCard key={robot.id} robot={robot} editing={editingRobot?.id === robot.id} onEdit={openEditForm} onSave={onSave} onCancel={() => setEditingRobot(null)} />)}</div>
                 : <div className="empty-robots"><span>Robot history starts here</span><p>Add the current robot, its build dates, description, and photos.</p></div>}
             {obsoleteRobots.length > 0 && (
                 <details className="obsolete-robots">
                     <summary>Show previous robots <span>{obsoleteRobots.length}</span></summary>
-                    <div className="robot-grid">{obsoleteRobots.map((robot) => <RobotCard key={robot.id} robot={robot} />)}</div>
+                    <div className="robot-grid">{obsoleteRobots.map((robot) => <RobotCard key={robot.id} robot={robot} editing={editingRobot?.id === robot.id} onEdit={openEditForm} onSave={onSave} onCancel={() => setEditingRobot(null)} />)}</div>
                 </details>
             )}
-            <button className="add-robot-button" type="button" onClick={() => setCreating(!creating)} aria-expanded={creating}>
-                {creating ? "Cancel" : "＋ Add another robot"}
-            </button>
+            {!creating && <button className="add-robot-button" type="button" onClick={openCreateForm}>＋ Add another robot</button>}
             {creating && (
                 <form className="robot-form" onSubmit={(event) => void submitRobot(event)}>
+                    <h4>Add a robot</h4>
                     <div className="robot-form-fields">
                         <label>Robot name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Atlas" /></label>
                         <label>Start month<input required type="month" value={startMonth} onChange={(event) => setStartMonth(event.target.value)} /></label>
                         <label>End month <span>(leave blank if current)</span><input type="month" value={endMonth} onChange={(event) => setEndMonth(event.target.value)} /></label>
                     </div>
                     <label>Description<textarea maxLength={2000} rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What makes this robot unique?" /></label>
-                    <label>Image links <span>(one URL per line, up to 8)</span><textarea rows={3} value={imageLinks} onChange={(event) => setImageLinks(event.target.value)} placeholder={"https://i.imgur.com/example.jpg"} /></label>
                     {formError && <p className="lookup-error" role="alert">{formError}</p>}
-                    <button className="search-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save robot"}</button>
+                    <div className="robot-form-actions">
+                        <button className="search-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save robot"}</button>
+                        <button className="robot-cancel-button" type="button" onClick={closeCreateForm} disabled={saving}>Cancel</button>
+                    </div>
                 </form>
             )}
         </div>
     );
 }
 
-function RobotCard({ robot }: { robot: RobotEntry }) {
+function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
+    robot: RobotEntry;
+    editing: boolean;
+    onEdit: (robot: RobotEntry) => void;
+    onSave: (robot: Omit<RobotEntry, "id">, robotId?: string) => Promise<void>;
+    onCancel: () => void;
+}) {
+    const [fullscreenPhoto, setFullscreenPhoto] = useState<{ photo: RobotImage; alt: string } | null>(null);
+    const [photoError, setPhotoError] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState("");
+    const [name, setName] = useState(robot.name);
+    const [description, setDescription] = useState(robot.description);
+    const [startMonth, setStartMonth] = useState(robot.startMonth);
+    const [endMonth, setEndMonth] = useState(robot.endMonth || "");
+    const [images, setImages] = useState(robot.imageUrls);
+    const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+    useEffect(() => {
+        setName(robot.name);
+        setDescription(robot.description);
+        setStartMonth(robot.startMonth);
+        setEndMonth(robot.endMonth || "");
+        setImages(robot.imageUrls);
+        setFormError("");
+        setPhotoError("");
+    }, [editing, robot.id, robot.imageUrls]);
+
+    useEffect(() => {
+        if (!fullscreenPhoto) return;
+        const previousOverflow = document.body.style.overflow;
+        const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        document.body.style.overflow = "hidden";
+        closeButtonRef.current?.focus();
+        function handleKeyDown(event: KeyboardEvent) {
+            if (event.key === "Escape") setFullscreenPhoto(null);
+        }
+        document.addEventListener("keydown", handleKeyDown);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            document.removeEventListener("keydown", handleKeyDown);
+            previouslyFocused?.focus();
+        };
+    }, [fullscreenPhoto]);
+
+    async function saveMetadata(event: React.FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        setSaving(true);
+        setFormError("");
+        try {
+            await onSave({ name, description, imageUrls: images, startMonth, endMonth: endMonth || null }, robot.id);
+            onCancel();
+        } catch (error) {
+            setFormError(error instanceof Error ? error.message : "Could not save robot.");
+        } finally {
+            setSaving(false);
+        }
+    }
+
     return (
         <article className="robot-card">
             <div className="robot-card-heading">
                 <div><h4>{robot.name}</h4><p>{formatMonth(robot.startMonth)} – {robot.endMonth ? formatMonth(robot.endMonth) : "Present"}</p></div>
-                {!robot.endMonth && <span className="current-robot-badge">Current</span>}
+                <div className="robot-card-actions">
+                    {!robot.endMonth && <span className="current-robot-badge">Current</span>}
+                    {!editing && <button className="edit-robot-button" type="button" onClick={() => onEdit(robot)} aria-label={`Edit ${robot.name}`}>Edit</button>}
+                </div>
             </div>
-            {robot.description && <p className="robot-description">{robot.description}</p>}
-            {robot.imageUrls.length > 0 && (
-                <div className="robot-images">
-                    {robot.imageUrls.map((url, index) => <a key={url} href={url} target="_blank" rel="noreferrer"><img src={url} alt={`${robot.name}, robot photo ${index + 1}`} loading="lazy" /></a>)}
+            {editing ? (
+                <form className="robot-edit-form" onSubmit={(event) => void saveMetadata(event)}>
+                    <section className="robot-metadata-editor" aria-labelledby={`robot-metadata-${robot.id}`}>
+                        <header className="robot-metadata-heading">
+                            <div><span className="robot-editor-kicker">Design record</span><h5 id={`robot-metadata-${robot.id}`}>Robot details</h5></div>
+                            <p>Give this robot its identity and a place in your team’s timeline.</p>
+                        </header>
+                        <label className="robot-metadata-field robot-name-field">
+                            <span>Robot name</span>
+                            <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Atlas" />
+                        </label>
+                        <fieldset className="robot-date-fields">
+                            <legend>Build timeline</legend>
+                            <label className="robot-metadata-field robot-date-field">
+                                <span>First built</span>
+                                <input required type="month" value={startMonth} onChange={(event) => setStartMonth(event.target.value)} />
+                                <small>When they started using this bot (beep boop)</small>
+                            </label>
+                            <label className="robot-metadata-field robot-date-field">
+                                <span>Retired</span>
+                                <input type="month" value={endMonth} onChange={(event) => setEndMonth(event.target.value)} />
+                                <small>Leave blank if this is the current robot (beep bop boopity</small>
+                            </label>
+                        </fieldset>
+                        <label className="robot-metadata-field robot-bio-field">
+                            <span>Robot bio</span>
+                            <textarea maxLength={2000} rows={5} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Share what this design does well, how it evolved, and what makes it unique." />
+                            <small>put robot notes here :D</small>
+                        </label>
+                    </section>
+                    <h5 className="robot-photo-editor-heading">Robot photos</h5>
+                    {images.length > 0 && (
+                        <div className="robot-images">
+                            {images.map((photo, index) => {
+                                const alt = `${robot.name}, robot photo ${index + 1}`;
+                                return (
+                                    <div className="robot-photo" key={photo.id}>
+                                        <button className="robot-photo-button" type="button" onClick={() => setFullscreenPhoto({ photo, alt })} aria-label={`View ${alt} fullscreen`}>
+                                            <img src={photo.url} alt={alt} loading="lazy" />
+                                        </button>
+                                        <button className="delete-robot-photo" type="button" aria-label={`Delete ${alt}`} title="Remove photo (saved when you click Save)" onClick={() => {
+                                            setImages((current) => current.filter((image) => image.id !== photo.id));
+                                            if (fullscreenPhoto?.photo.id === photo.id) setFullscreenPhoto(null);
+                                        }}><TrashIcon /></button>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                    {photoError && <p className="robot-photo-error" role="alert">{photoError}</p>}
+                    <button className="add-photo-button" type="button" onClick={addPhoto} disabled={images.length >= 8}>＋ Add photo</button>
+                    {formError && <p className="lookup-error" role="alert">{formError}</p>}
+                    <div className="robot-form-actions robot-edit-actions">
+                        <button className="search-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save changes"}</button>
+                        <button className="robot-cancel-button" type="button" onClick={onCancel} disabled={saving}>Cancel</button>
+                    </div>
+                </form>
+            ) : (
+                <>
+                    {robot.description && <p className="robot-description">{robot.description}</p>}
+                    {robot.imageUrls.length > 0 && (
+                        <div className="robot-images">
+                            {robot.imageUrls.map((photo, index) => {
+                                const alt = `${robot.name}, robot photo ${index + 1}`;
+                                return <button className="robot-photo-button" key={photo.id} type="button" onClick={() => setFullscreenPhoto({ photo, alt })} aria-label={`View ${alt} fullscreen`}><img src={photo.url} alt={alt} loading="lazy" /></button>;
+                            })}
+                        </div>
+                    )}
+                </>
+            )}
+            {fullscreenPhoto && (
+                <div className="robot-lightbox" role="dialog" aria-modal="true" aria-label="Fullscreen robot photo" onClick={() => setFullscreenPhoto(null)}>
+                    <button ref={closeButtonRef} className="robot-lightbox-close" type="button" aria-label="Close fullscreen image" onClick={() => setFullscreenPhoto(null)}>×</button>
+                    <div className="robot-lightbox-content" onClick={(event) => event.stopPropagation()}>
+                        <img src={fullscreenPhoto.photo.url} alt={fullscreenPhoto.alt} />
+                        <p>Added by <strong>{fullscreenPhoto.photo.displayName}</strong></p>
+                    </div>
                 </div>
             )}
         </article>
     );
+
+    function addPhoto() {
+        const url = window.prompt("Enter a direct link to one robot photo:");
+        if (url === null) return;
+        setPhotoError("");
+        const trimmedUrl = url.trim();
+        try {
+            const parsed = new URL(trimmedUrl);
+            if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("Use an http or https image URL.");
+        } catch {
+            setPhotoError("Enter a valid image URL using http or https.");
+            return;
+        }
+        if (trimmedUrl.length > 2048) {
+            setPhotoError("Image URLs must be 2,048 characters or fewer.");
+            return;
+        }
+        setImages((current) => [...current, {
+            id: crypto.randomUUID(),
+            url: trimmedUrl,
+            addedBy: null,
+            displayName: "You (pending save)",
+        }]);
+    }
+}
+
+function TrashIcon() {
+    return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 6h18M8 6V4h8v2m3 0-.9 14H5.9L5 6m4 4v6m6-6v6" />
+    </svg>;
 }
 
 function formatMonth(value: string) {

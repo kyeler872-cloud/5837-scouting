@@ -109,15 +109,36 @@ body {
 .robot-section-content > .section-description { margin-bottom: 1.25rem; }
 .robot-grid { display: grid; gap: 1rem; }
 .robot-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); background: linear-gradient(145deg, #102b4b, #0b1f3a 72%); padding: clamp(1rem, 3vw, 1.5rem); }
+.robot-card:hover, .robot-card:focus-within { border-color: var(--blue-600); box-shadow: 0 0.75rem 2rem #0003; }
 .robot-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.robot-card-actions { display: flex; align-items: center; gap: 0.5rem; }
+.edit-robot-button { border: 1px solid var(--blue-600); background: var(--navy-900); color: var(--blue-300); cursor: pointer; font: inherit; font-size: 0.72rem; font-weight: 800; padding: 0.45rem 0.7rem; opacity: 0; transition: opacity 160ms ease, background 160ms ease, color 160ms ease; }
+.robot-card:hover .edit-robot-button, .robot-card:focus-within .edit-robot-button { opacity: 1; }
+.edit-robot-button:hover { background: var(--blue-600); color: var(--navy-950); }
 .robot-card-heading h4 { margin: 0; font-size: clamp(1.65rem, 4vw, 2.25rem); letter-spacing: -0.045em; line-height: 1.1; }
 .robot-card-heading p { margin: 0.55rem 0 0; color: var(--blue-300); font-size: 0.78rem; font-weight: 700; }
 .current-robot-badge { flex: none; border: 1px solid #4fa3d166; border-radius: 99px; background: #4fa3d11c; color: var(--blue-300); font-size: 0.65rem; font-weight: 800; letter-spacing: 0.08em; padding: 0.4rem 0.65rem; text-transform: uppercase; }
 .robot-description { margin: 1.25rem 0 0; color: var(--muted); font-size: 0.95rem; line-height: 1.7; white-space: pre-wrap; }
-.robot-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: 0.6rem; margin-top: 1.25rem; }
-.robot-images a { display: block; overflow: hidden; background: var(--navy-950); }
-.robot-images img { display: block; width: 100%; max-height: 24rem; aspect-ratio: 16 / 10; object-fit: cover; transition: transform 180ms ease; }
-.robot-images a:hover img { transform: scale(1.025); }
+.robot-images { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.6rem; margin-top: 1.25rem; }
+.robot-photo { position: relative; min-width: 0; }
+.robot-photo-button { display: grid; aspect-ratio: 1; overflow: hidden; place-items: center; border: 1px solid var(--line); background: #030b15; cursor: zoom-in; padding: 0; }
+.robot-photo-button img { display: block; width: 100%; height: 100%; object-fit: contain; transition: transform 180ms ease; }
+.robot-photo-button:hover img { transform: scale(1.035); }
+.delete-robot-photo { position: absolute; top: 0.4rem; right: 0.4rem; display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid #ffffff70; border-radius: 50%; background: #071426eF; color: #ffb4ab; cursor: pointer; }
+.delete-robot-photo svg { width: 1rem; height: 1rem; }
+.delete-robot-photo:hover { background: #a33a42; color: white; }
+.delete-robot-photo:disabled { cursor: wait; opacity: 0.6; }
+.add-photo-button { margin-top: 0.75rem; border: 1px solid var(--line); background: #0b1f3a; color: var(--blue-300); cursor: pointer; font: inherit; font-size: 0.75rem; font-weight: 800; padding: 0.6rem 0.8rem; }
+.add-photo-button:hover:not(:disabled) { border-color: var(--blue-600); background: var(--navy-800); }
+.add-photo-button:disabled { cursor: not-allowed; opacity: 0.55; }
+.robot-photo-error { margin: 0.6rem 0 0; color: #ffb4ab; font-size: 0.8rem; }
+.robot-lightbox { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; background: #020711f2; padding: clamp(1rem, 4vw, 3rem); }
+.robot-lightbox-content { display: grid; min-width: 0; max-width: 100%; max-height: 100%; justify-items: center; gap: 0.75rem; }
+.robot-lightbox-content img { display: block; max-width: 100%; max-height: calc(100vh - 7rem); object-fit: contain; }
+.robot-lightbox-content p { margin: 0; color: var(--muted); font-size: 0.85rem; text-align: center; }
+.robot-lightbox-content strong { color: var(--white); }
+.robot-lightbox-close { position: absolute; top: max(1rem, env(safe-area-inset-top)); right: max(1rem, env(safe-area-inset-right)); display: grid; width: 2.75rem; height: 2.75rem; place-items: center; border: 1px solid #ffffff66; border-radius: 50%; background: #071426cc; color: var(--white); cursor: pointer; font: inherit; font-size: 2rem; line-height: 1; }
+.robot-lightbox-close:hover { background: var(--blue-600); color: var(--navy-950); }
 .empty-robots { border: 1px dashed var(--line); padding: 1.5rem; }
 .empty-robots span { font-size: 1.1rem; font-weight: 800; }
 .empty-robots p { margin: 0.4rem 0 0; color: var(--muted); font-size: 0.85rem; }
@@ -128,6 +149,31 @@ body {
 .add-robot-button { margin-top: 1rem; border: 1px solid var(--blue-600); background: transparent; color: var(--blue-300); cursor: pointer; font: inherit; font-size: 0.82rem; font-weight: 800; padding: 0.75rem 1rem; transition: background 160ms ease, color 160ms ease; }
 .add-robot-button:hover { background: var(--blue-600); color: var(--navy-950); }
 .robot-form { display: grid; gap: 1rem; margin-top: 1rem; border: 1px solid var(--line); background: var(--navy-900); padding: clamp(1rem, 3vw, 1.5rem); }
+.robot-form > h4 { margin: 0; color: var(--white); font-size: 1.25rem; }
+.robot-edit-form { display: grid; gap: 1rem; margin-top: 1.25rem; }
+.robot-edit-form h5, .robot-photo-editor-heading { margin: 0; color: var(--blue-300); font-size: 0.7rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+.robot-metadata-editor { display: grid; gap: 1rem; border: 1px solid #4fa3d144; background: linear-gradient(145deg, #12345b99, #071426cc); padding: clamp(1rem, 3vw, 1.4rem); }
+.robot-metadata-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--line); padding-bottom: 0.9rem; }
+.robot-metadata-heading > div { display: grid; gap: 0.35rem; }
+.robot-editor-kicker { color: var(--blue-300); font-size: 0.62rem; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; }
+.robot-metadata-heading h5 { color: var(--white); font-size: 1rem; letter-spacing: -0.02em; text-transform: none; }
+.robot-metadata-heading p { max-width: 18rem; margin: 0; color: var(--muted); font-size: 0.76rem; line-height: 1.5; text-align: right; }
+.robot-metadata-field { display: grid; gap: 0.5rem; color: var(--muted); font-size: 0.72rem; font-weight: 750; }
+.robot-metadata-field > span { color: var(--white); }
+.robot-edit-form .robot-metadata-field input, .robot-edit-form .robot-metadata-field textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #426487; border-radius: 0.2rem; background: #071426b8; color: var(--white); font: inherit; font-size: 0.9rem; padding: 0.8rem 0.9rem; transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease; }
+.robot-edit-form .robot-metadata-field input:focus, .robot-edit-form .robot-metadata-field textarea:focus { border-color: var(--blue-600); outline: none; background: #071426; box-shadow: 0 0 0 3px #4fa3d126; }
+.robot-edit-form .robot-metadata-field input::placeholder, .robot-edit-form .robot-metadata-field textarea::placeholder { color: #7892ad; }
+.robot-name-field input { font-size: 1.05rem !important; font-weight: 700 !important; }
+.robot-date-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; min-width: 0; margin: 0; border: 0; padding: 0; }
+.robot-date-fields legend { margin-bottom: 0.5rem; color: var(--blue-300); font-size: 0.65rem; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+.robot-date-field { align-content: start; border: 1px solid var(--line); background: #0b1f3a99; padding: 0.8rem; }
+.robot-date-field input { min-height: 2.8rem; }
+.robot-metadata-field small { color: #91a9c1; font-size: 0.67rem; font-weight: 450; line-height: 1.45; }
+.robot-bio-field textarea { min-height: 8rem; resize: vertical; line-height: 1.65 !important; }
+.robot-photo-editor-heading { margin-top: 1.25rem; }
+.robot-edit-actions { margin-top: 0.75rem; }
+.robot-form-actions { display: flex; align-items: center; gap: 0.75rem; }
+.robot-cancel-button { border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 0.8rem; font-weight: 700; padding: 0.75rem 1rem; }
 .robot-form-fields { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 0.75rem; }
 .robot-form label { display: grid; gap: 0.45rem; color: var(--muted); font-size: 0.75rem; font-weight: 700; }
 .robot-form label span { font-weight: 400; }
@@ -135,6 +181,10 @@ body {
 .robot-form textarea { resize: vertical; line-height: 1.5; }
 .robot-form input:focus, .robot-form textarea:focus { outline: 2px solid var(--blue-600); outline-offset: 1px; }
 .robot-form .search-button { min-height: 2.8rem; justify-self: start; }
+
+@media (hover: none) {
+	.edit-robot-button { opacity: 1; }
+}
 
 .topbar {
 	display: flex;
@@ -177,4 +227,8 @@ body {
 	.team-section { scroll-margin-top: 4.5rem; }
 	.performance-card { align-items: flex-start; flex-direction: column; gap: 0.9rem; }
 	.robot-form-fields { grid-template-columns: 1fr; }
+	.robot-metadata-heading { flex-direction: column; }
+	.robot-metadata-heading p { text-align: left; }
+	.robot-date-fields { grid-template-columns: 1fr; }
+	.robot-images { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
