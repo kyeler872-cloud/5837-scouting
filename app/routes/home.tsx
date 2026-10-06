@@ -1,7 +1,7 @@
 // imports for routing, clerk auth, react state, and our protected page wrapper
 import type { Route } from "./+types/home";
 import { Show, UserButton, useAuth, useUser, useOrganization } from "@clerk/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Protected } from "../protected";
 
 // quick type definition for generic json objects from api
@@ -18,9 +18,19 @@ type TeamLookupResponse = {
     overrides: Record<string, { value: string; displayName: string }>;
     selectedEvents: Record<string, { eventName: string; displayName: string }>;
     customEvents: { code: string; name: string; date: string | null; displayName: string }[];
-    ftcScout: { available: boolean; warning: string | null; scores: { auto: number | null; teleop: number | null; endgame: number | null; total: number | null; penalties: number | null; winRate: number | null } };
+    performance: { auto: { average: string | null; matchCount: number }; teleop: { average: string | null; matchCount: number } };
+    robots: RobotEntry[];
     warnings: string[];
     meta: { fetchedAt: string; source: string; editableFields: string[] };
+};
+
+type RobotEntry = {
+    id: string;
+    name: string;
+    description: string;
+    imageUrls: string[];
+    startMonth: string;
+    endMonth: string | null;
 };
 
 // helper to grab a text or number string out of a json object using a list of key names
@@ -42,18 +52,6 @@ function records(value: JsonRecord | JsonRecord[] | null) {
         if (Array.isArray(value[key])) return value[key] as JsonRecord[];
     }
     return [value];
-}
-
-// calculates the average score from match data and rounds to 1 decimal place
-function averageMatchScore(matches: JsonRecord | JsonRecord[] | null) {
-    const scores = records(matches)
-        .map((match) => {
-            const value = match.score ?? match.totalScore ?? match.actualScore;
-            return typeof value === "number" ? value : Number(value);
-        })
-        .filter((score) => Number.isFinite(score));
-    if (!scores.length) return null;
-    return (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1);
 }
 
 // helper to parse api fetch responses into json or throw an error message
@@ -107,6 +105,22 @@ export default function Home() {
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
     const [error, setError] = useState("");
     const [isSearching, setIsSearching] = useState(false);
+    const [activeSection, setActiveSection] = useState("auto");
+
+    useEffect(() => {
+        if (!result) return;
+        const observer = new IntersectionObserver((entries) => {
+            const visible = entries
+                .filter((entry) => entry.isIntersecting)
+                .sort((first, second) => first.boundingClientRect.top - second.boundingClientRect.top)[0];
+            if (visible) setActiveSection(visible.target.id);
+        }, { rootMargin: "-15% 0px -70% 0px", threshold: 0 });
+        const sections = ["auto", "teleop", "events", "robot"]
+            .map((id) => document.getElementById(id))
+            .filter((section): section is HTMLElement => section !== null);
+        sections.forEach((section) => observer.observe(section));
+        return () => observer.disconnect();
+    }, [result]);
 
     // handles search form submission and fetches team data from backend
     async function searchTeam(event: React.FormEvent<HTMLFormElement>) {
@@ -120,6 +134,7 @@ export default function Home() {
 
         setError("");
         setResult(null);
+        setActiveSection("auto");
         setIsSearching(true);
         try {
             const token = await getToken();
@@ -170,6 +185,31 @@ export default function Home() {
         }
     }
 
+    async function createRobot(robot: Omit<RobotEntry, "id">) {
+        if (!result) return;
+        try {
+            const token = await getToken();
+            const response = await fetch(`/api/teams/${result.teamNumber}?season=${result.season}`, {
+                method: "PUT",
+                headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+                body: JSON.stringify({
+                    field: "robot",
+                    robotName: robot.name,
+                    description: robot.description,
+                    imageUrls: robot.imageUrls,
+                    startMonth: robot.startMonth,
+                    endMonth: robot.endMonth,
+                }),
+            });
+            const data = await readResponse<{ robots?: RobotEntry[]; error?: string }>(response);
+            if (!response.ok) throw new Error(data.error || "Could not save robot.");
+            setResult({ ...result, robots: data.robots || result.robots });
+        } catch (saveError) {
+            setError(saveError instanceof Error ? saveError.message : "Could not save robot.");
+            throw saveError;
+        }
+    }
+
     // renders the page UI inside protected auth wrapper
     return (
         <Protected>
@@ -214,23 +254,62 @@ export default function Home() {
                             </div>
                             {(() => { const logo = textValue(result.team, ["logo", "logoUrl", "teamLogo"]); return logo ? <img className="team-logo" src={logo} alt="Team logo" /> : null; })()}
                         </header>
-                        {/* summary stats section */}
                         <div className="team-facts">
                             <div><span>Rookie year</span><strong>{textValue(result.team, ["rookieYear"]) || "Unavailable"}</strong></div>
                             <div><span>Events</span><SourceMark /><strong>{records(result.events).length || "None listed"}</strong></div>
                             <div><span>Awards</span><SourceMark /><strong>{records(result.awards).length || "None listed"}</strong></div>
-                            <div><span>Average score</span><SourceMark /><strong>{averageMatchScore(result.matches) || "Unavailable"}</strong></div>
                         </div>
-                        {/* inline editable shared scouting notes */}
-                        <div className="custom-notes"><span>Shared scouting notes</span><EditableValue field="notes" value={result.overrides.notes?.value || "Add a note"} attribution={result.overrides.notes?.displayName} onSave={saveOverride} /></div>
-                        {/* detailed scores breakdown panel */}
-                        <ScoresPanel scores={result.ftcScout.scores} available={result.ftcScout.available} warning={result.ftcScout.warning} />
-                        {/* list of events and awards */}
-                        <div className="result-columns">
-                            <details className="events-awards" open>
-                                <summary>Events and awards</summary>
-                                <div className="result-columns"><EventList items={records(result.events)} customEvents={result.customEvents} onCreate={createEvent} /><ResultList title="Awards" items={records(result.awards)} primaryKeys={["name", "awardName", "eventName"]} /></div>
-                            </details>
+                        <div className="team-sections-layout">
+                            <aside className="section-sidebar" aria-label="Team page sections">
+                                <p>On this page</p>
+                                <nav>
+                                    {(["auto", "teleop", "events", "robot"] as const).map((id) => (
+                                        <button
+                                            type="button"
+                                            key={id}
+                                            className={activeSection === id ? "active" : ""}
+                                            aria-current={activeSection === id ? "location" : undefined}
+                                            onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                                        >
+                                            {id === "teleop" ? "TeleOp" : id === "auto" ? "Auto" : id[0].toUpperCase() + id.slice(1)}
+                                        </button>
+                                    ))}
+                                </nav>
+                            </aside>
+                            <div className="team-sections">
+                                <PerformanceSection
+                                    id="auto"
+                                    title="Auto"
+                                    description="Average autonomous points per match from FIRST event results."
+                                    score={result.performance.auto.average}
+                                    matchCount={result.performance.auto.matchCount}
+                                    note={result.overrides.autoNotes}
+                                    onSave={saveOverride}
+                                />
+                                <PerformanceSection
+                                    id="teleop"
+                                    title="TeleOp"
+                                    description="Average teleoperated points per match from FIRST event results."
+                                    score={result.performance.teleop.average}
+                                    matchCount={result.performance.teleop.matchCount}
+                                    note={result.overrides.teleopNotes}
+                                    onSave={saveOverride}
+                                />
+                                <section className="team-section" id="events">
+                                    <SectionHeading eyebrow="Competition record" title="Events" />
+                                    <details className="events-awards" open>
+                                        <summary>Events and awards</summary>
+                                        <div className="result-columns">
+                                            <EventList items={records(result.events)} customEvents={result.customEvents} onCreate={createEvent} />
+                                            <ResultList title="Awards" items={records(result.awards)} primaryKeys={["name", "awardName", "eventName"]} />
+                                        </div>
+                                    </details>
+                                </section>
+                                <section className="team-section" id="robot">
+                                    <SectionHeading eyebrow="Build history" title="Robot" />
+                                    <RobotSection robots={result.robots} onCreate={createRobot} />
+                                </section>
+                            </div>
                         </div>
                         {result.warnings.length > 0 && <p className="lookup-warning">Some FIRST data was unavailable: {result.warnings.join("; ")}</p>}
                     </section>
@@ -262,10 +341,125 @@ function UserBadge() {
     );
 }
 
-// renders ftcscout scores in a grid layout
-function ScoresPanel({ scores, available, warning }: { scores: TeamLookupResponse["ftcScout"]["scores"]; available: boolean; warning: string | null }) {
-    const fields: [string, number | string | null][] = [["Auto", scores.auto], ["Teleop", scores.teleop], ["Endgame", scores.endgame], ["Total", scores.total], ["Penalties", scores.penalties], ["Win rate", scores.winRate === null ? null : `${scores.winRate}%`]];
-    return <section className="scores-panel"><div className="panel-heading"><div><p className="section-kicker">FTCScout</p><h3>Scores</h3></div><span className="data-status">{available ? "Live data" : "Placeholder"}</span></div><div className="score-grid">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value === null ? "Not available yet" : value}</strong></div>)}</div>{warning && <p className="lookup-warning">{warning}</p>}</section>;
+function SectionHeading({ eyebrow, title }: { eyebrow: string; title: string }) {
+    return <header className="team-section-heading"><p className="section-kicker">{eyebrow}</p><h3>{title}</h3></header>;
+}
+
+function PerformanceSection({ id, title, description, score, matchCount, note, onSave }: {
+    id: string;
+    title: string;
+    description: string;
+    score: string | null;
+    matchCount: number;
+    note?: { value: string; displayName: string };
+    onSave: (field: string, value: string) => Promise<void>;
+}) {
+    const field = id === "auto" ? "autoNotes" : "teleopNotes";
+    return (
+        <section className="team-section performance-section" id={id}>
+            <SectionHeading eyebrow="FIRST match data" title={title} />
+            <div className="performance-card">
+                <div className="performance-score"><span>Average points per match</span><strong>{score ?? "—"}</strong></div>
+                <p><SourceMark />{matchCount ? `Based on ${matchCount} scored ${matchCount === 1 ? "match" : "matches"}.` : "No scored matches were returned for this team."}</p>
+            </div>
+            <div className="custom-notes">
+                <span>{title} notes</span>
+                <p className="section-description">{description}</p>
+                <EditableValue field={field} value={note?.value || "Add a note"} attribution={note?.displayName} onSave={onSave} />
+            </div>
+        </section>
+    );
+}
+
+function RobotSection({ robots, onCreate }: { robots: RobotEntry[]; onCreate: (robot: Omit<RobotEntry, "id">) => Promise<void> }) {
+    const [creating, setCreating] = useState(false);
+    const [name, setName] = useState("");
+    const [description, setDescription] = useState("");
+    const [imageLinks, setImageLinks] = useState("");
+    const [startMonth, setStartMonth] = useState("");
+    const [endMonth, setEndMonth] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState("");
+    const currentRobots = robots.filter((robot) => !robot.endMonth);
+    const obsoleteRobots = robots.filter((robot) => Boolean(robot.endMonth));
+
+    async function submitRobot(event: React.FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        setSaving(true);
+        setFormError("");
+        try {
+            await onCreate({
+                name,
+                description,
+                imageUrls: imageLinks.split(/\r?\n/).map((link) => link.trim()).filter(Boolean),
+                startMonth,
+                endMonth: endMonth || null,
+            });
+            setName("");
+            setDescription("");
+            setImageLinks("");
+            setStartMonth("");
+            setEndMonth("");
+            setCreating(false);
+        } catch (saveError) {
+            setFormError(saveError instanceof Error ? saveError.message : "Could not save robot.");
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    return (
+        <div className="robot-section-content">
+            <p className="section-description">A manually maintained timeline of the team’s robot designs.</p>
+            {currentRobots.length > 0
+                ? <div className="robot-grid">{currentRobots.map((robot) => <RobotCard key={robot.id} robot={robot} />)}</div>
+                : <div className="empty-robots"><span>Robot history starts here</span><p>Add the current robot, its build dates, description, and photos.</p></div>}
+            {obsoleteRobots.length > 0 && (
+                <details className="obsolete-robots">
+                    <summary>Show previous robots <span>{obsoleteRobots.length}</span></summary>
+                    <div className="robot-grid">{obsoleteRobots.map((robot) => <RobotCard key={robot.id} robot={robot} />)}</div>
+                </details>
+            )}
+            <button className="add-robot-button" type="button" onClick={() => setCreating(!creating)} aria-expanded={creating}>
+                {creating ? "Cancel" : "＋ Add another robot"}
+            </button>
+            {creating && (
+                <form className="robot-form" onSubmit={(event) => void submitRobot(event)}>
+                    <div className="robot-form-fields">
+                        <label>Robot name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Atlas" /></label>
+                        <label>Start month<input required type="month" value={startMonth} onChange={(event) => setStartMonth(event.target.value)} /></label>
+                        <label>End month <span>(leave blank if current)</span><input type="month" value={endMonth} onChange={(event) => setEndMonth(event.target.value)} /></label>
+                    </div>
+                    <label>Description<textarea maxLength={2000} rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What makes this robot unique?" /></label>
+                    <label>Image links <span>(one URL per line, up to 8)</span><textarea rows={3} value={imageLinks} onChange={(event) => setImageLinks(event.target.value)} placeholder={"https://i.imgur.com/example.jpg"} /></label>
+                    {formError && <p className="lookup-error" role="alert">{formError}</p>}
+                    <button className="search-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save robot"}</button>
+                </form>
+            )}
+        </div>
+    );
+}
+
+function RobotCard({ robot }: { robot: RobotEntry }) {
+    return (
+        <article className="robot-card">
+            <div className="robot-card-heading">
+                <div><h4>{robot.name}</h4><p>{formatMonth(robot.startMonth)} – {robot.endMonth ? formatMonth(robot.endMonth) : "Present"}</p></div>
+                {!robot.endMonth && <span className="current-robot-badge">Current</span>}
+            </div>
+            {robot.description && <p className="robot-description">{robot.description}</p>}
+            {robot.imageUrls.length > 0 && (
+                <div className="robot-images">
+                    {robot.imageUrls.map((url, index) => <a key={url} href={url} target="_blank" rel="noreferrer"><img src={url} alt={`${robot.name}, robot photo ${index + 1}`} loading="lazy" /></a>)}
+                </div>
+            )}
+        </article>
+    );
+}
+
+function formatMonth(value: string) {
+    const [year, month] = value.split("-").map(Number);
+    return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(year, month - 1, 1)));
 }
 
 // little icon component to mark official first data

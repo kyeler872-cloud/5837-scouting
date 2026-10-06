@@ -7,8 +7,6 @@ type FtcEnv = Env & {
 	FTC_API_USERNAME?: string;
 	FTC_API_AUTH?: string;
 	SCOUTING_DB?: D1Database;
-	FTCSCOUT_GRAPHQL_URL?: string;
-	FTCSCOUT_API_TOKEN?: string;
 };
 
 type FtcResponse<T> = {
@@ -20,39 +18,14 @@ type FtcResponse<T> = {
 const FTC_API_BASE = "https://ftc-api.firstinspires.org/v2.0";
 const DEFAULT_SEASON = "2025";
 
-type FtcScoutScores = {
-	auto: number | null;
-	teleop: number | null;
-	endgame: number | null;
-	total: number | null;
-	penalties: number | null;
-	winRate: number | null;
+type RobotEntry = {
+	id: string;
+	name: string;
+	description: string;
+	imageUrls: string[];
+	startMonth: string;
+	endMonth: string | null;
 };
-
-async function fetchFtcScout(env: FtcEnv, teamNumber: string, season: string) {
-	const emptyScores: FtcScoutScores = { auto: null, teleop: null, endgame: null, total: null, penalties: null, winRate: null };
-	if (!env.FTCSCOUT_GRAPHQL_URL || !env.FTCSCOUT_API_TOKEN) {
-		return { available: false, scores: emptyScores, warning: "FTCScout is not configured yet." };
-	}
-
-	// Keep this adapter isolated until the exact FTCScout schema/query is supplied.
-	const query = `query TeamScouting($teamNumber: Int!, $season: String!) { team(teamNumber: $teamNumber, season: $season) { auto teleop endgame total penalties winRate } }`;
-	try {
-		const response = await fetch(env.FTCSCOUT_GRAPHQL_URL, {
-			method: "POST",
-			headers: { "content-type": "application/json", authorization: `Bearer ${env.FTCSCOUT_API_TOKEN}` },
-			body: JSON.stringify({ query, variables: { teamNumber: Number(teamNumber), season } }),
-			signal: AbortSignal.timeout(10000),
-		});
-		const payload = await response.json() as { data?: { team?: Partial<FtcScoutScores> | null }; errors?: { message?: string }[] };
-		if (!response.ok || payload.errors?.length || !payload.data?.team) {
-			return { available: false, scores: emptyScores, warning: payload.errors?.[0]?.message || `FTCScout returned ${response.status}.` };
-		}
-		return { available: true, scores: { ...emptyScores, ...payload.data.team }, warning: null };
-	} catch (error) {
-		return { available: false, scores: emptyScores, warning: `FTCScout request failed: ${error instanceof Error ? error.message : "unknown error"}` };
-	}
-}
 
 function listFrom<T>(value: Record<string, unknown> | null, key: string): T[] {
 	if (!value) return [];
@@ -144,6 +117,28 @@ async function getCustomEvents(db: D1Database | undefined, teamNumber: string, s
 	}
 }
 
+async function getRobots(db: D1Database | undefined, teamNumber: string, season: string): Promise<RobotEntry[]> {
+	if (!db || typeof db.prepare !== "function") return [];
+	try {
+		const result = await db.prepare(`SELECT id, name, description, image_urls, start_month, end_month
+			FROM robot_entries WHERE team_number = ? AND season = ?
+			ORDER BY (end_month IS NULL) DESC, start_month DESC, created_at DESC`)
+			.bind(teamNumber, season)
+			.all<{ id: string; name: string; description: string; image_urls: string; start_month: string; end_month: string | null }>();
+		return result.results.map((row) => ({
+			id: row.id,
+			name: row.name,
+			description: row.description,
+			imageUrls: JSON.parse(row.image_urls) as string[],
+			startMonth: row.start_month,
+			endMonth: row.end_month,
+		}));
+	} catch (error) {
+		console.error(JSON.stringify({ message: "Could not read robot entries", error: error instanceof Error ? error.message : String(error) }));
+		return [];
+	}
+}
+
 function formatDisplayName(firstName: string | null, lastInitial: string | null) {
 	if (firstName) return `${firstName}${lastInitial ? ` ${lastInitial}.` : ""}`;
 	return "Account name unavailable";
@@ -159,7 +154,38 @@ async function getUserIdentity(env: FtcEnv, userId: string) {
 	return { firstName: firstName.slice(0, 100), lastInitial, accountName: accountName.slice(0, 100) };
 }
 
-	const EDITABLE_FIELDS = new Set(["notes", "customRating"]);
+const EDITABLE_FIELDS = new Set(["autoNotes", "teleopNotes"]);
+
+function averageAllianceScore(matches: Record<string, unknown>[], teamNumber: string, phase: "Auto" | "Teleop") {
+	const scores: number[] = [];
+	for (const match of matches) {
+		const teams = Array.isArray(match.teams) ? match.teams as Record<string, unknown>[] : [];
+		const assignment = teams.find((team) => String(team.teamNumber) === teamNumber);
+		const station = typeof assignment?.station === "string" ? assignment.station.toLowerCase() : "";
+		const alliance = station.startsWith("red") ? "Red" : station.startsWith("blue") ? "Blue" : null;
+		if (!alliance) continue;
+		const score = match[`score${alliance}${phase}`];
+		if (typeof score === "number" && Number.isFinite(score) && score >= 0) scores.push(score);
+	}
+	return {
+		average: scores.length ? (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1) : null,
+		matchCount: scores.length,
+	};
+}
+
+function validMonth(value: unknown): value is string {
+	return typeof value === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+}
+
+function validImageUrl(value: unknown): value is string {
+	if (typeof value !== "string" || value.length > 2048) return false;
+	try {
+		const url = new URL(value);
+		return url.protocol === "https:" || url.protocol === "http:";
+	} catch {
+		return false;
+	}
+}
 
 async function fetchFtc<T>(
 	path: string,
@@ -258,7 +284,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 
 	const teamRecords = listFrom<Record<string, unknown>>(team.data, "teams");
 	const teamProfile = teamRecords[0] || team.data;
-	const ftcScout = await fetchFtcScout(env, teamNumber, season);
+	const auto = averageAllianceScore(matches.matches as Record<string, unknown>[], teamNumber, "Auto");
+	const teleop = averageAllianceScore(matches.matches as Record<string, unknown>[], teamNumber, "Teleop");
 
 	return json({
 		teamNumber,
@@ -270,7 +297,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		overrides: await getOverrides(env.SCOUTING_DB, teamNumber, season),
 		selectedEvents: await getSelectedEvents(env.SCOUTING_DB, teamNumber, season),
 		customEvents: await getCustomEvents(env.SCOUTING_DB, teamNumber, season),
-		ftcScout,
+		performance: { auto, teleop },
+		robots: await getRobots(env.SCOUTING_DB, teamNumber, season),
 		warnings,
 		meta: {
 			fetchedAt: new Date().toISOString(),
@@ -294,7 +322,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	}
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: "Enter a valid FTC team number." }, 400);
 
-	let body: { field?: unknown; value?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown };
+	let body: { field?: unknown; value?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown };
 	try {
 		body = (await request.json()) as { field?: unknown; value?: unknown };
 	} catch {
@@ -330,6 +358,26 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			return json({ error: `Could not create event: ${error instanceof Error ? error.message : "database error"}` }, 503);
 		}
 		return json({ customEvents: await getCustomEvents(env.SCOUTING_DB, teamNumber, season) });
+	}
+
+	if (body.field === "robot") {
+		if (typeof body.robotName !== "string" || !body.robotName.trim() || body.robotName.trim().length > 120) return json({ error: "Enter a robot name (up to 120 characters)." }, 400);
+		if (typeof body.description !== "string" || body.description.length > 2000) return json({ error: "Robot description must be 2,000 characters or fewer." }, 400);
+		if (!validMonth(body.startMonth)) return json({ error: "Choose a valid robot start month." }, 400);
+		if (body.endMonth !== null && body.endMonth !== "" && !validMonth(body.endMonth)) return json({ error: "Choose a valid robot end month." }, 400);
+		const endMonth = typeof body.endMonth === "string" && body.endMonth ? body.endMonth : null;
+		if (endMonth && endMonth < body.startMonth) return json({ error: "Robot end month cannot be before its start month." }, 400);
+		if (!Array.isArray(body.imageUrls) || body.imageUrls.length > 8 || !body.imageUrls.every(validImageUrl)) return json({ error: "Add up to 8 valid image URLs using http or https." }, 400);
+
+		try {
+			await env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+				.bind(crypto.randomUUID(), teamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify(body.imageUrls), body.startMonth, endMonth)
+				.run();
+		} catch (error) {
+			return json({ error: `Could not save robot: ${error instanceof Error ? error.message : "database error"}` }, 503);
+		}
+		return json({ robots: await getRobots(env.SCOUTING_DB, teamNumber, season) });
 	}
 
 	if (typeof body.field !== "string" || !EDITABLE_FIELDS.has(body.field) || typeof body.value !== "string" || body.value.length > 500) {
