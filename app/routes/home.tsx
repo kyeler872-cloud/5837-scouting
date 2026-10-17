@@ -2,6 +2,7 @@
 import type { Route } from "./+types/home";
 import { UserButton, useAuth, useUser, useOrganization } from "@clerk/react-router";
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import { Protected } from "../protected";
 
 // quick type definition for generic json objects from api
@@ -112,6 +113,7 @@ export function meta({}: Route.MetaArgs) {
 export default function Home() {
     // clerk auth hook to grab auth token for api calls
     const { getToken } = useAuth();
+    const [searchParams] = useSearchParams();
     // react state hooks for tracking search inputs, team data results, errors, and loading state
     const [teamNumber, setTeamNumber] = useState("");
     const [league, setLeague] = useState<"FTC" | "FRC">("FTC");
@@ -120,6 +122,7 @@ export default function Home() {
     const [error, setError] = useState("");
     const [isSearching, setIsSearching] = useState(false);
     const [activeSection, setActiveSection] = useState("auto");
+    const autoSearchStarted = useRef(false);
 
     useEffect(() => {
         if (!result) return;
@@ -135,6 +138,19 @@ export default function Home() {
         sections.forEach((section) => observer.observe(section));
         return () => observer.disconnect();
     }, [result]);
+
+    useEffect(() => {
+        if (autoSearchStarted.current) return;
+        const requestedTeam = searchParams.get("team");
+        const requestedLeague = searchParams.get("league")?.toUpperCase();
+        const requestedSeason = searchParams.get("season");
+        if (!requestedTeam || (requestedLeague !== "FTC" && requestedLeague !== "FRC") || !requestedSeason) return;
+        autoSearchStarted.current = true;
+        setTeamNumber(requestedTeam);
+        setLeague(requestedLeague);
+        setSeason(requestedSeason);
+        window.requestAnimationFrame(() => document.querySelector<HTMLFormElement>(".team-search")?.requestSubmit());
+    }, [searchParams]);
 
     // handles search form submission and fetches team data from backend
     async function searchTeam(event: React.FormEvent<HTMLFormElement>) {
@@ -234,7 +250,11 @@ export default function Home() {
                     <a className="brand" href="/home">
                         <span>Scout 5837</span>
                     </a>
-                    <div style={{ display: "flex", alignItems: "center" }}>
+                    <div className="topbar-right">
+                        <div className="topbar-tabs" aria-label="Search mode">
+                            <a href="/home" aria-current="page">Team search</a>
+                            <a href="/events">Event search</a>
+                        </div>
                         <UserBadge />
                         <UserButton />
                     </div>
@@ -319,7 +339,7 @@ export default function Home() {
                                     <details className="events-awards" open>
                                         <summary>Events and awards</summary>
                                         <div className="result-columns">
-                                            <EventList league={result.league} items={records(result.events)} customEvents={result.customEvents} onCreate={createEvent} />
+                                            <EventList league={result.league} season={result.season} teamNumber={result.teamNumber} items={records(result.events)} customEvents={result.customEvents} onCreate={createEvent} />
                                             <ResultList league={result.league} title="Awards" items={records(result.awards)} primaryKeys={["name", "awardName", "eventName"]} />
                                         </div>
                                     </details>
@@ -687,14 +707,23 @@ function ResultList({ title, items, primaryKeys, league, firstSource = true }: {
 }
 
 // renders event lists and form to create custom events
-function EventList({ league, items, customEvents, onCreate }: { league: "FTC" | "FRC"; items: JsonRecord[]; customEvents: TeamLookupResponse["customEvents"]; onCreate: (name: string, date: string) => Promise<void> }) {
+function EventList({ league, season, teamNumber, items, customEvents, onCreate }: { league: "FTC" | "FRC"; season: string; teamNumber: string; items: JsonRecord[]; customEvents: TeamLookupResponse["customEvents"]; onCreate: (name: string, date: string) => Promise<void> }) {
     const [creating, setCreating] = useState(false);
     const [name, setName] = useState("");
     const [date, setDate] = useState("");
     return <section className="result-list"><h3><SourceMark league={league} />Events <button className="event-add-button" type="button" onClick={() => setCreating(!creating)} aria-expanded={creating} title="Create a new event">+</button></h3>
         {creating && <form className="new-event-form" onSubmit={(event) => { event.preventDefault(); void onCreate(name, date).then(() => { setName(""); setDate(""); setCreating(false); }); }}><input aria-label="Event name" placeholder="New event name" value={name} onChange={(event) => setName(event.target.value)} /><input aria-label="Event date" type="date" value={date} onChange={(event) => setDate(event.target.value)} /><button type="submit">Create</button></form>}
-        {items.length ? items.slice(0, 12).map((item, index) => <p className="event-row" key={`first-${index}`}><SourceMark league={league} /><span>{textValue(item, ["name", "eventName", "code", "key"]) || "Event"}</span><strong className="custom-event-date">{firstEventDate(item)}</strong></p>) : <p className="muted">No {league} events returned.</p>}
-        {customEvents.map((event) => <p className="event-row custom-event" key={event.code}><span>{event.name}</span><strong className="custom-event-date">{event.date ? formatEventDate(event.date) : "Date unavailable"}</strong><span className="attribution">{event.displayName}</span></p>)}
+        {items.length ? items.slice(0, 12).map((item, index) => {
+            const code = textValue(item, league === "FTC" ? ["code"] : ["key"]);
+            const returnTo = `/home?${new URLSearchParams({ league, season, team: teamNumber })}`;
+            const eventUrl = code ? `/events/${league}/${season}/${encodeURIComponent(code)}?${new URLSearchParams({ returnTo })}` : null;
+            return <p className="event-row" key={`first-${index}`}><SourceMark league={league} />{eventUrl ? <a href={eventUrl}>{textValue(item, ["name", "eventName", "code", "key"]) || "Event"}</a> : <span>{textValue(item, ["name", "eventName", "code", "key"]) || "Event"}</span>}<strong className="custom-event-date">{firstEventDate(item)}</strong></p>;
+        }) : <p className="muted">No {league} events returned.</p>}
+        {customEvents.map((event) => {
+            const returnTo = `/home?${new URLSearchParams({ league, season, team: teamNumber })}`;
+            const eventUrl = `/events/${league}/${season}/${encodeURIComponent(event.code)}?${new URLSearchParams({ returnTo })}`;
+            return <p className="event-row custom-event" key={event.code}><a href={eventUrl}>{event.name}</a><strong className="custom-event-date">{event.date ? formatEventDate(event.date) : "Date unavailable"}</strong><span className="attribution">{event.displayName}</span></p>;
+        })}
     </section>;
 }
 

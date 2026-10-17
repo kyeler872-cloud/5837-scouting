@@ -16,6 +16,10 @@ export default function TermsOfService() {
 					<a className="brand" href="/home">
 						<span>Scout 5837</span>
 					</a>
+					<div className="topbar-tabs" aria-label="Search mode">
+						<a href="/home">Team search</a>
+						<a href="/events">Event search</a>
+					</div>
 					<a className="terms-link" href="/home">Back to home</a>
 				</nav>
 				<article className="terms-page">
