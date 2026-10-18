@@ -27,6 +27,24 @@ type EventEnv = Env & {
 
 const FTC_API_BASE = "https://ftc-api.firstinspires.org/v2.0";
 const TBA_API_BASE = "https://www.thebluealliance.com/api/v3";
+const US_REGION_NAMES: Record<string, string> = {
+	AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+	CO: "Colorado", CT: "Connecticut", DE: "Delaware", FL: "Florida", GA: "Georgia",
+	HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa",
+	KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland",
+	MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri",
+	MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey",
+	NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio",
+	OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina",
+	SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont",
+	VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+	DC: "District of Columbia", AS: "American Samoa", GU: "Guam", MP: "Northern Mariana Islands",
+	PR: "Puerto Rico", VI: "U.S. Virgin Islands",
+};
+
+function readableRegion(value: string) {
+	return US_REGION_NAMES[value.toUpperCase()] || value;
+}
 
 function json(data: unknown, status = 200) {
 	return new Response(JSON.stringify(data), {
@@ -89,9 +107,9 @@ function summarizeEvent(event: EventRecord, league: League): EventSummary | null
 		name: stringField(event, ["name", "eventName"]) || code,
 		startDate: stringField(event, league === "FTC" ? ["dateStart", "start_date"] : ["start_date"]) || null,
 		endDate: stringField(event, league === "FTC" ? ["dateEnd", "end_date"] : ["end_date"]) || null,
-		region: league === "FTC"
+		region: readableRegion(league === "FTC"
 			? stringField(event, ["regionCode", "region"])
-			: stringField(district, ["display_name", "abbreviation"]) || stringField(event, ["state_prov", "country"]) || "Other",
+			: stringField(district, ["display_name", "abbreviation"]) || stringField(event, ["state_prov", "country"]) || "Other"),
 		city: stringField(event, ["city"]),
 		state: stringField(event, ["stateProv", "state_prov"]),
 		country: stringField(event, ["country"]),

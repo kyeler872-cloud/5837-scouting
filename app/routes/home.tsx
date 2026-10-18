@@ -124,6 +124,38 @@ export default function Home() {
     const [activeSection, setActiveSection] = useState("auto");
     const autoSearchStarted = useRef(false);
 
+    async function lookupTeam(number: string, targetSeason: string, targetLeague: "FTC" | "FRC") {
+        const normalizedTeamNumber = number.trim();
+        if (!/^\d{1,6}$/.test(normalizedTeamNumber)) {
+            setTeamNumber(number);
+            setLeague(targetLeague);
+            setSeason(targetSeason);
+            setError(`Enter a valid ${targetLeague} team number.`);
+            return;
+        }
+
+        setTeamNumber(normalizedTeamNumber);
+        setLeague(targetLeague);
+        setSeason(targetSeason);
+        setError("");
+        setResult(null);
+        setActiveSection("auto");
+        setIsSearching(true);
+        try {
+            const token = await getToken();
+            const response = await fetch(teamApiUrl(normalizedTeamNumber, targetSeason, targetLeague), {
+                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            });
+            const data = await readResponse<TeamLookupResponse | { error?: string }>(response);
+            if (!response.ok) throw new Error("error" in data ? data.error : "Team lookup failed.");
+            setResult(data as TeamLookupResponse);
+        } catch (lookupError) {
+            setError(lookupError instanceof Error ? lookupError.message : "Team lookup failed.");
+        } finally {
+            setIsSearching(false);
+        }
+    }
+
     useEffect(() => {
         if (!result) return;
         const observer = new IntersectionObserver((entries) => {
@@ -149,36 +181,13 @@ export default function Home() {
         setTeamNumber(requestedTeam);
         setLeague(requestedLeague);
         setSeason(requestedSeason);
-        window.requestAnimationFrame(() => document.querySelector<HTMLFormElement>(".team-search")?.requestSubmit());
-    }, [searchParams]);
+        void lookupTeam(requestedTeam, requestedSeason, requestedLeague);
+    }, [searchParams, getToken]);
 
     // handles search form submission and fetches team data from backend
     async function searchTeam(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
-        const normalizedTeamNumber = teamNumber.trim();
-        // check if team number is valid 1-6 digits
-        if (!/^\d{1,6}$/.test(normalizedTeamNumber)) {
-            setError(`Enter a valid ${league} team number.`);
-            return;
-        }
-
-        setError("");
-        setResult(null);
-        setActiveSection("auto");
-        setIsSearching(true);
-        try {
-            const token = await getToken();
-            const response = await fetch(teamApiUrl(normalizedTeamNumber, season, league), {
-                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-            });
-            const data = await readResponse<TeamLookupResponse | { error?: string }>(response);
-            if (!response.ok) throw new Error("error" in data ? data.error : "Team lookup failed.");
-            setResult(data as TeamLookupResponse);
-        } catch (lookupError) {
-            setError(lookupError instanceof Error ? lookupError.message : "Team lookup failed.");
-        } finally {
-            setIsSearching(false);
-        }
+        await lookupTeam(teamNumber, season, league);
     }
 
     // sends put request to save custom notes or overrides to database
