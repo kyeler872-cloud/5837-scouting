@@ -149,7 +149,7 @@ export default function LogsPage() {
 					{isLoading && <p className="logs-status" aria-busy="true">Loading logs...</p>}
 					{!isLoading && isAllowed === false && <section className="logs-denied" role="alert">
 						<h2>Access not allowed</h2>
-						<p>Your account can't access this debug page. Ask Kyeler Werkmeister to add your email or account name to the whitelist.</p>
+						<p>this page contains debug and account information, if you need to see edit logs, please ask kyeler or a mentor</p>
 					</section>}
 					{!isLoading && isAllowed && <>
 						{canManageWhitelist && <section className="logs-whitelist">
