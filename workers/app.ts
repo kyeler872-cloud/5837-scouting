@@ -13,4 +13,10 @@ export default {
 		loadContext.set(cloudflareContext, { env, ctx });
 		return requestHandler(request, loadContext);
 	},
+	scheduled(_controller, env, ctx) {
+		ctx.waitUntil(env.SCOUTING_DB.prepare("DELETE FROM audit_logs WHERE created_at < datetime('now', '-7 days')").run()
+			.catch((error) => {
+				console.error(JSON.stringify({ message: "Could not expire old audit logs", error: error instanceof Error ? error.message : String(error) }));
+			}));
+	},
 } satisfies ExportedHandler<Env>;

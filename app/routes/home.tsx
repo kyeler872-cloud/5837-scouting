@@ -324,6 +324,7 @@ export default function Home() {
                         <div className="topbar-tabs" aria-label="Search mode">
                             <a href="/home" aria-current="page">Team search</a>
                             <a href="/events">Event search</a>
+                            <a href="/logs">Logs</a>
                         </div>
                         <UserBadge />
                         <UserButton />

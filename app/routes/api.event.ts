@@ -1,6 +1,7 @@
-import { createClerkClient, verifyToken } from "@clerk/backend";
+import { verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.event";
 import { cloudflareContext } from "../cloudflare-context";
+import { auditStatement, getAuditActor } from "../audit.server";
 
 type League = "FTC" | "FRC";
 type ApiObject = Record<string, unknown>;
@@ -80,11 +81,6 @@ function validPhotoUrl(value: unknown): value is string {
 
 function dbTeamNumber(league: League, number: string) {
 	return league === "FRC" ? `frc:${number}` : number;
-}
-
-async function userName(env: EventEnv, userId: string) {
-	const user = await createClerkClient({ secretKey: env.CLERK_SECRET_KEY! }).users.getUser(userId);
-	return user.fullName?.trim() || user.username?.trim() || "Contributor";
 }
 
 export async function loader({ request, params, context }: Route.LoaderArgs) {
@@ -231,22 +227,35 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	}
 
 	try {
-		const displayName = await userName(env, session.sub);
+		const actor = await getAuditActor(env, session.sub);
+		const displayName = actor.accountName;
 		if (body.action === "note") {
 			if (typeof body.category !== "string" || !NOTE_CATEGORIES.includes(body.category as typeof NOTE_CATEGORIES[number])) return json({ error: "Choose a valid note category." }, 400);
 			if (typeof body.note !== "string" || body.note.length > 10000) return json({ error: "Notes must be 10,000 characters or fewer." }, 400);
-			await env.SCOUTING_DB.prepare(`INSERT INTO event_notes (league, season, event_code, category, note, updated_by, updated_by_account_name, updated_at)
+			const previous = await env.SCOUTING_DB.prepare("SELECT note FROM event_notes WHERE league = ? AND season = ? AND event_code = ? AND category = ?")
+				.bind(league, season, eventCode, body.category).first<{ note: string }>();
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`INSERT INTO event_notes (league, season, event_code, category, note, updated_by, updated_by_account_name, updated_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(league, season, event_code, category) DO UPDATE SET note = excluded.note, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-				.bind(league, season, eventCode, body.category, body.note.trim(), session.sub, displayName).run();
+					.bind(league, season, eventCode, body.category, body.note.trim(), session.sub, displayName),
+				auditStatement(env.SCOUTING_DB, actor, "Updated event notes", `${league} ${season} / ${eventCode}: ${body.category}`,
+					previous?.note ?? null, body.note.trim()),
+			]);
 			return json({ category: body.category, note: { value: body.note.trim(), displayName } });
 		}
 		if (body.action === "photos") {
 			if (!validPhotoUrl(body.photosUrl)) return json({ error: "Enter a valid http or https photos link." }, 400);
-			await env.SCOUTING_DB.prepare(`INSERT INTO event_assets (league, season, event_code, photos_url, updated_by, updated_by_account_name, updated_at)
+			const previous = await env.SCOUTING_DB.prepare("SELECT photos_url FROM event_assets WHERE league = ? AND season = ? AND event_code = ?")
+				.bind(league, season, eventCode).first<{ photos_url: string }>();
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`INSERT INTO event_assets (league, season, event_code, photos_url, updated_by, updated_by_account_name, updated_at)
 				VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(league, season, event_code) DO UPDATE SET photos_url = excluded.photos_url, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-				.bind(league, season, eventCode, body.photosUrl.trim(), session.sub, displayName).run();
+					.bind(league, season, eventCode, body.photosUrl.trim(), session.sub, displayName),
+				auditStatement(env.SCOUTING_DB, actor, "Updated event photos link", `${league} ${season} / ${eventCode}`,
+					previous?.photos_url ?? null, body.photosUrl.trim()),
+			]);
 			return json({ photosUrl: body.photosUrl.trim() });
 		}
 		if (body.action === "add-team") {
@@ -257,10 +266,18 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			if (!customEvent) return json({ error: "Teams can only be imported manually into custom events." }, 400);
 			if (typeof body.teamNumber !== "string" || !/^\d{1,6}$/.test(body.teamNumber.trim())) return json({ error: `Enter a valid ${league} team number.` }, 400);
 			if (body.teamName !== undefined && (typeof body.teamName !== "string" || body.teamName.length > 200)) return json({ error: "Team names must be 200 characters or fewer." }, 400);
-			await env.SCOUTING_DB.prepare(`INSERT INTO event_manual_teams (league, season, event_code, team_number, team_name, added_by, added_by_account_name)
+			const teamNumber = body.teamNumber.trim();
+			const previous = await env.SCOUTING_DB.prepare("SELECT team_name FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? AND team_number = ?")
+				.bind(league, season, eventCode, teamNumber).first<{ team_name: string }>();
+			const teamName = typeof body.teamName === "string" ? body.teamName.trim() : "";
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`INSERT INTO event_manual_teams (league, season, event_code, team_number, team_name, added_by, added_by_account_name)
 				VALUES (?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(league, season, event_code, team_number) DO UPDATE SET team_name = excluded.team_name`)
-				.bind(league, season, eventCode, body.teamNumber.trim(), typeof body.teamName === "string" ? body.teamName.trim() : "", session.sub, displayName).run();
+					.bind(league, season, eventCode, teamNumber, teamName, session.sub, displayName),
+				auditStatement(env.SCOUTING_DB, actor, previous ? "Updated custom event team" : "Added team to custom event", `${league} ${season} / ${eventCode}: team ${teamNumber}`,
+					previous?.team_name ?? null, teamName),
+			]);
 			return json({ ok: true });
 		}
 		if (body.action === "remove-team") {
@@ -270,8 +287,14 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			).bind(eventCode, season).first<{ found: number }>();
 			if (!customEvent) return json({ error: "Teams can only be removed from custom events." }, 400);
 			if (typeof body.teamNumber !== "string" || !/^\d{1,6}$/.test(body.teamNumber)) return json({ error: "Invalid team number." }, 400);
-			await env.SCOUTING_DB.prepare("DELETE FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? AND team_number = ?")
-				.bind(league, season, eventCode, body.teamNumber).run();
+			const previous = await env.SCOUTING_DB.prepare("SELECT team_name FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? AND team_number = ?")
+				.bind(league, season, eventCode, body.teamNumber).first<{ team_name: string }>();
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare("DELETE FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? AND team_number = ?")
+					.bind(league, season, eventCode, body.teamNumber),
+				auditStatement(env.SCOUTING_DB, actor, "Removed team from custom event", `${league} ${season} / ${eventCode}: team ${body.teamNumber}`,
+					previous?.team_name ?? null, null),
+			]);
 			return json({ ok: true });
 		}
 		return json({ error: "Choose a valid event edit." }, 400);

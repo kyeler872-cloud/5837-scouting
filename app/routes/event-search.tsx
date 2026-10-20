@@ -78,7 +78,7 @@ export default function EventSearchPage() {
 					setRegions(availableRegions);
 					setRegion((current) => availableRegions.includes(current)
 						? current
-						: availableRegions.find((item) => item.toLowerCase().includes("iowa") || item.toUpperCase() === "IA") || "");
+						: availableRegions.find((item) => item.toLowerCase().includes("iowa") || item.toUpperCase() === "IA") || "Iowa");
 				}
 			} catch (regionError) {
 				if (!cancelled) setError(regionError instanceof Error ? regionError.message : "Could not load event regions.");
@@ -122,6 +122,7 @@ export default function EventSearchPage() {
 					<div className="topbar-tabs" aria-label="Search mode">
 						<a href="/home">Team search</a>
 						<a href="/events" aria-current="page">Event search</a>
+						<a href="/logs">Logs</a>
 					</div>
 					<UserButton />
 				</nav>
@@ -133,7 +134,7 @@ export default function EventSearchPage() {
 						<div className="search-options event-search-options">
 							<div><label htmlFor="event-league">Program</label><select id="event-league" value={league} onChange={(event) => setLeague(event.target.value as League)}><option value="FTC">FTC</option><option value="FRC">FRC</option></select></div>
 							<div><label htmlFor="event-season">Season</label><select id="event-season" value={season} onChange={(event) => setSeason(event.target.value)}>{(league === "FTC" ? ftcSeasons : frcSeasons).map((year) => <option key={year} value={year}>{year}-{String(year + 1).slice(-2)}</option>)}</select></div>
-							<div><label htmlFor="event-region">Region</label><select id="event-region" value={region} onChange={(event) => setRegion(event.target.value)}><option value="">All regions</option>{regions.map((item) => <option key={item} value={item}>{item}</option>)}</select></div>
+							<div><label htmlFor="event-region">Region</label><select id="event-region" value={region} onChange={(event) => setRegion(event.target.value)}><option value="">All regions</option>{region && !regions.includes(region) && <option value={region}>{region}</option>}{regions.map((item) => <option key={item} value={item}>{item}</option>)}</select></div>
 						</div>
 						<div className="search-row"><button className="search-button" type="submit" disabled={loading}>{loading ? "Searching..." : "Search events"}</button></div>
 					</form>

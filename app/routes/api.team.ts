@@ -1,6 +1,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.team";
 import { cloudflareContext } from "../cloudflare-context";
+import { auditStatement, getAuditActor } from "../audit.server";
 
 type FtcEnv = Env & {
 	CLERK_SECRET_KEY?: string;
@@ -213,7 +214,12 @@ async function getUserIdentity(env: FtcEnv, userId: string) {
 	if (!firstName || !lastName) throw new Error("Clerk first and last names are required.");
 	const lastInitial = user.lastName?.trim().charAt(0) || null;
 	const accountName = user.fullName?.trim() || `${firstName} ${lastName}`;
-	return { firstName: firstName.slice(0, 100), lastInitial, accountName: accountName.slice(0, 100) };
+	return {
+		firstName: firstName.slice(0, 100),
+		lastInitial,
+		accountName: accountName.slice(0, 100),
+		email: user.primaryEmailAddress?.emailAddress?.trim().toLowerCase() || null,
+	};
 }
 
 const EDITABLE_FIELDS = new Set(["autoNotes", "teleopNotes"]);
@@ -489,7 +495,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		}
 
 		try {
-			await env.SCOUTING_DB.batch(SOCIAL_PLATFORMS.map((platform) => {
+			const actor = await getAuditActor(env, session.sub);
+			const previousLinks = await getSocialLinks(env.SCOUTING_DB, league, dbTeamNumber);
+			await env.SCOUTING_DB.batch([...SOCIAL_PLATFORMS.map((platform) => {
 				const value = socialLinks[platform];
 				return value
 					? env.SCOUTING_DB!.prepare(`INSERT INTO team_social_links (league, team_number, platform, value, updated_at)
@@ -498,7 +506,8 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 						.bind(league, dbTeamNumber, platform, value)
 					: env.SCOUTING_DB!.prepare("DELETE FROM team_social_links WHERE league = ? AND team_number = ? AND platform = ?")
 						.bind(league, dbTeamNumber, platform);
-			}));
+			}), auditStatement(env.SCOUTING_DB, actor, "Updated team social links", `${league} ${teamNumber} / ${season}`,
+				JSON.stringify(previousLinks, null, 2), JSON.stringify(socialLinks, null, 2))]);
 		} catch (error) {
 			return json({ error: `Could not save team social links: ${error instanceof Error ? error.message : "database error"}` }, 503);
 		}
@@ -508,14 +517,22 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if (body.field === "eventSelection") {
 		if (typeof body.eventCode !== "string" || typeof body.eventName !== "string" || typeof body.selected !== "boolean") return json({ error: "Invalid event selection." }, 400);
 		const identity = await getUserIdentity(env, session.sub);
-		if (body.selected) {
-			await env.SCOUTING_DB.prepare(`INSERT INTO selected_events (team_number, season, event_code, event_name, added_by, added_by_first_name, added_by_last_initial, added_by_account_name)
+		const previous = await env.SCOUTING_DB.prepare("SELECT event_name FROM selected_events WHERE team_number = ? AND season = ? AND event_code = ?")
+			.bind(dbTeamNumber, season, body.eventCode).first<{ event_name: string }>();
+		const edit = body.selected
+			? env.SCOUTING_DB.prepare(`INSERT INTO selected_events (team_number, season, event_code, event_name, added_by, added_by_first_name, added_by_last_initial, added_by_account_name)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(team_number, season, event_code) DO NOTHING`)
-				.bind(dbTeamNumber, season, body.eventCode, body.eventName.slice(0, 500), session.sub, identity.firstName, identity.lastInitial, identity.accountName).run();
-		} else {
-			await env.SCOUTING_DB.prepare("DELETE FROM selected_events WHERE team_number = ? AND season = ? AND event_code = ? AND added_by = ?")
-				.bind(dbTeamNumber, season, body.eventCode, session.sub).run();
-		}
+				.bind(dbTeamNumber, season, body.eventCode, body.eventName.slice(0, 500), session.sub, identity.firstName, identity.lastInitial, identity.accountName)
+			: env.SCOUTING_DB.prepare("DELETE FROM selected_events WHERE team_number = ? AND season = ? AND event_code = ? AND added_by = ?")
+				.bind(dbTeamNumber, season, body.eventCode, session.sub);
+		await env.SCOUTING_DB.batch([
+			edit,
+			auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email },
+				body.selected ? "Added team event" : "Removed team event",
+				`${league} ${teamNumber} / ${season}: ${body.eventName.slice(0, 200)} (${body.eventCode.slice(0, 120)})`,
+				JSON.stringify({ selected: Boolean(previous), eventName: previous?.event_name || null }),
+				JSON.stringify({ selected: body.selected, eventName: body.selected ? body.eventName.slice(0, 500) : null })),
+		]);
 		return json({ selectedEvents: await getSelectedEvents(env.SCOUTING_DB, dbTeamNumber, season) });
 	}
 
@@ -527,9 +544,14 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		const eventCode = `custom-${crypto.randomUUID()}`;
 		if (body.eventDate !== undefined && (typeof body.eventDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(body.eventDate))) return json({ error: "Enter a valid event date." }, 400);
 		try {
-			await env.SCOUTING_DB.prepare(`INSERT INTO custom_events (team_number, season, event_code, event_name, event_date, created_by, created_by_first_name, created_by_last_initial, created_by_account_name)
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`INSERT INTO custom_events (team_number, season, event_code, event_name, event_date, created_by, created_by_first_name, created_by_last_initial, created_by_account_name)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(team_number, season, event_code) DO UPDATE SET event_name = excluded.event_name, event_date = excluded.event_date`)
-				.bind(dbTeamNumber, season, eventCode, body.eventName.trim(), body.eventDate || null, session.sub, identity.firstName, identity.lastInitial, identity.accountName).run();
+					.bind(dbTeamNumber, season, eventCode, body.eventName.trim(), body.eventDate || null, session.sub, identity.firstName, identity.lastInitial, identity.accountName),
+				auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Created custom team event",
+					`${league} ${teamNumber} / ${season}: ${body.eventName.trim()} (${eventCode})`,
+					null, JSON.stringify({ name: body.eventName.trim(), date: body.eventDate || null }, null, 2)),
+			]);
 		} catch (error) {
 			return json({ error: `Could not create event: ${error instanceof Error ? error.message : "database error"}` }, 503);
 		}
@@ -558,14 +580,14 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		if (new Set(submittedImages.map((image) => image.id)).size !== submittedImages.length) return json({ error: "Robot photos must have unique IDs." }, 400);
 
 		try {
+			const identity = await getUserIdentity(env, session.sub);
 			if (typeof body.robotId === "string") {
-				const existing = await env.SCOUTING_DB.prepare("SELECT image_urls FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
+				const existing = await env.SCOUTING_DB.prepare("SELECT name, description, image_urls, start_month, end_month FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
 					.bind(body.robotId, dbTeamNumber, season)
-					.first<{ image_urls: string }>();
+					.first<{ name: string; description: string; image_urls: string; start_month: string; end_month: string | null }>();
 				if (!existing) return json({ error: "Robot entry not found." }, 404);
 				const existingImages = parseRobotImages(existing.image_urls);
 				const existingById = new Map(existingImages.map((image) => [image.id, image]));
-				const identity = await getUserIdentity(env, session.sub);
 				const images: RobotImage[] = submittedImages.map((image) => {
 					const savedImage = existingById.get(image.id);
 					if (savedImage) return { ...savedImage, url: image.url };
@@ -576,17 +598,39 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 						displayName: identity.accountName,
 					};
 				});
-				const result = await env.SCOUTING_DB.prepare(`UPDATE robot_entries
+				const result = await env.SCOUTING_DB.batch([
+					env.SCOUTING_DB.prepare(`UPDATE robot_entries
 					SET name = ?, description = ?, image_urls = ?, start_month = ?, end_month = ?
 					WHERE id = ? AND team_number = ? AND season = ?`)
-					.bind(body.robotName.trim(), body.description.trim(), JSON.stringify(images), body.startMonth, endMonth, body.robotId, dbTeamNumber, season)
-					.run();
-				if (!result.meta.changes) return json({ error: "Robot entry not found." }, 404);
+						.bind(body.robotName.trim(), body.description.trim(), JSON.stringify(images), body.startMonth, endMonth, body.robotId, dbTeamNumber, season),
+					auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Updated robot entry",
+						`${league} ${teamNumber} / ${season}: ${body.robotName.trim()} (${body.robotId})`,
+						JSON.stringify({
+							name: existing.name,
+							description: existing.description,
+							images: parseRobotImages(existing.image_urls).map(({ url }) => url),
+							startMonth: existing.start_month,
+							endMonth: existing.end_month,
+						}, null, 2),
+						JSON.stringify({
+							name: body.robotName.trim(),
+							description: body.description.trim(),
+							images: images.map(({ url }) => url),
+							startMonth: body.startMonth,
+							endMonth,
+						}, null, 2)),
+				]);
+				if (!result[0].meta.changes) return json({ error: "Robot entry not found." }, 404);
 			} else {
-				await env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-					.bind(crypto.randomUUID(), dbTeamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify([]), body.startMonth, endMonth)
-					.run();
+				await env.SCOUTING_DB.batch([
+					env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+						.bind(crypto.randomUUID(), dbTeamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify([]), body.startMonth, endMonth),
+					auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Created robot entry",
+						`${league} ${teamNumber} / ${season}: ${body.robotName.trim()}`,
+						null,
+						JSON.stringify({ name: body.robotName.trim(), description: body.description.trim(), images: [], startMonth: body.startMonth, endMonth }, null, 2)),
+				]);
 			}
 		} catch (error) {
 			return json({ error: `Could not ${body.robotId ? "update" : "save"} robot: ${error instanceof Error ? error.message : "database error"}` }, 503);
@@ -600,12 +644,18 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	const identity = await getUserIdentity(env, session.sub);
 
 	try {
-		await env.SCOUTING_DB
-			.prepare(`INSERT INTO team_overrides (team_number, season, field, value, updated_by, updated_by_first_name, updated_by_last_initial, updated_by_account_name, updated_at)
+		const previous = await env.SCOUTING_DB.prepare("SELECT value FROM team_overrides WHERE team_number = ? AND season = ? AND field = ?")
+			.bind(dbTeamNumber, season, body.field).first<{ value: string }>();
+		await env.SCOUTING_DB.batch([
+			env.SCOUTING_DB
+				.prepare(`INSERT INTO team_overrides (team_number, season, field, value, updated_by, updated_by_first_name, updated_by_last_initial, updated_by_account_name, updated_at)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(team_number, season, field) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_by_first_name = excluded.updated_by_first_name, updated_by_last_initial = excluded.updated_by_last_initial, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-			.bind(dbTeamNumber, season, body.field, body.value.trim(), session.sub, identity.firstName, identity.lastInitial, identity.accountName)
-			.run();
+				.bind(dbTeamNumber, season, body.field, body.value.trim(), session.sub, identity.firstName, identity.lastInitial, identity.accountName),
+			auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Updated team notes",
+				`${league} ${teamNumber} / ${season}: ${body.field}`,
+				previous?.value ?? null, body.value.trim()),
+		]);
 	} catch (error) {
 		return json({ error: `Could not save edit: ${error instanceof Error ? error.message : "database error"}` }, 503);
 	}

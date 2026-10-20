@@ -7,6 +7,9 @@
 	"observability": {
 		"enabled": true
 	},
+	"triggers": {
+		"crons": ["0 * * * *"]
+	},
 	"upload_source_maps": true,
 	"vars": {
 		"CLERK_PUBLISHABLE_KEY": "pk_test_Ym9sZC1mYWxjb24tNDI1MC5jbGVyay5hY2NvdW50cy5kZXYk",

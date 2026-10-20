@@ -19,6 +19,7 @@ export default function TermsOfService() {
 					<div className="topbar-tabs" aria-label="Search mode">
 						<a href="/home">Team search</a>
 						<a href="/events">Event search</a>
+						<a href="/logs">Logs</a>
 					</div>
 					<a className="terms-link" href="/home">Back to home</a>
 				</nav>
