@@ -14,6 +14,7 @@ type TeamLookupResponse = {
     teamNumber: string;
     season: string;
     team: JsonRecord | null;
+    socialLinks: SocialLinks;
     events: JsonRecord | JsonRecord[] | null;
     awards: JsonRecord | JsonRecord[] | null;
     matches: JsonRecord | JsonRecord[] | null;
@@ -24,6 +25,16 @@ type TeamLookupResponse = {
     robots: RobotEntry[];
     warnings: string[];
     meta: { fetchedAt: string; source: string; editableFields: string[] };
+};
+
+type SocialLinks = {
+    website: string;
+    facebook: string;
+    x: string;
+    instagram: string;
+    youtube: string;
+    email: string;
+    other: string;
 };
 
 type RobotEntry = {
@@ -119,8 +130,10 @@ export default function Home() {
     const [league, setLeague] = useState<"FTC" | "FRC">("FTC");
     const [season, setSeason] = useState("2025");
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
+    const [socialLinks, setSocialLinks] = useState<SocialLinks>({ website: "", facebook: "", x: "", instagram: "", youtube: "", email: "", other: "" });
     const [error, setError] = useState("");
     const [isSearching, setIsSearching] = useState(false);
+    const [isSavingSocials, setIsSavingSocials] = useState(false);
     const [activeSection, setActiveSection] = useState("auto");
     const autoSearchStarted = useRef(false);
 
@@ -148,7 +161,9 @@ export default function Home() {
             });
             const data = await readResponse<TeamLookupResponse | { error?: string }>(response);
             if (!response.ok) throw new Error("error" in data ? data.error : "Team lookup failed.");
-            setResult(data as TeamLookupResponse);
+            const teamResult = data as TeamLookupResponse;
+            setResult(teamResult);
+            setSocialLinks(teamResult.socialLinks);
         } catch (lookupError) {
             setError(lookupError instanceof Error ? lookupError.message : "Team lookup failed.");
         } finally {
@@ -202,6 +217,30 @@ export default function Home() {
         } catch (saveError) {
             setError(saveError instanceof Error ? saveError.message : "Could not save edit.");
             throw saveError;
+        }
+    }
+
+    async function saveSocialLinks(event: React.FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        if (!result) return;
+        setIsSavingSocials(true);
+        setError("");
+        try {
+            const token = await getToken();
+            const response = await fetch(teamApiUrl(result.teamNumber, result.season, result.league), {
+                method: "PUT",
+                headers: { "content-type": "application/json", ...(token ? { Authorization: `****** } : {}) },
+                body: JSON.stringify({ field: "socialLinks", socials: socialLinks }),
+            });
+            const data = await readResponse<{ socialLinks?: SocialLinks; error?: string }>(response);
+            if (!response.ok) throw new Error(data.error || "Could not save team social links.");
+            const savedLinks = data.socialLinks || socialLinks;
+            setSocialLinks(savedLinks);
+            setResult({ ...result, socialLinks: savedLinks });
+        } catch (saveError) {
+            setError(saveError instanceof Error ? saveError.message : "Could not save team social links.");
+        } finally {
+            setIsSavingSocials(false);
         }
     }
 
@@ -300,6 +339,32 @@ export default function Home() {
                             </div>
                             {(() => { const logo = textValue(result.team, ["logo", "logoUrl", "teamLogo"]); return logo ? <img className="team-logo" src={logo} alt="Team logo" /> : null; })()}
                         </header>
+                        <form className="team-social-links" onSubmit={(event) => void saveSocialLinks(event)}>
+                            <p className="section-kicker">Team links</p>
+                            <div className="team-social-grid">
+                                {([
+                                    ["website", "Website", "https://"],
+                                    ["facebook", "Facebook", "https://"],
+                                    ["x", "X", "https://"],
+                                    ["instagram", "Instagram", "https://"],
+                                    ["youtube", "YouTube", "https://"],
+                                    ["email", "Email", "team@example.com"],
+                                    ["other", "Other", "https://"],
+                                ] as const).map(([field, label, placeholder]) => (
+                                    <label key={field}>
+                                        <span>{label}</span>
+                                        <input
+                                            type={field === "email" ? "email" : "url"}
+                                            maxLength={field === "email" ? 320 : 2048}
+                                            placeholder={placeholder}
+                                            value={socialLinks[field]}
+                                            onChange={(event) => setSocialLinks((current) => ({ ...current, [field]: event.target.value }))}
+                                        />
+                                    </label>
+                                ))}
+                            </div>
+                            <button className="search-button" type="submit" disabled={isSavingSocials}>{isSavingSocials ? "Saving..." : "Save team links"}</button>
+                        </form>
                         <div className="team-facts">
                             <div><span>Rookie year</span><strong>{textValue(result.team, ["rookieYear", "rookie_year"]) || "Unavailable"}</strong></div>
                             <div><span>Events</span><SourceMark league={result.league} /><strong>{records(result.events).length || "None listed"}</strong></div>

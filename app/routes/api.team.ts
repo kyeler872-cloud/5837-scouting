@@ -43,6 +43,10 @@ type RobotImage = {
 	displayName: string;
 };
 
+const SOCIAL_PLATFORMS = ["website", "facebook", "x", "instagram", "youtube", "email", "other"] as const;
+type SocialPlatform = typeof SOCIAL_PLATFORMS[number];
+type SocialLinks = Record<SocialPlatform, string>;
+
 function parseRobotImages(value: string): RobotImage[] {
 	const parsed: unknown = JSON.parse(value);
 	if (!Array.isArray(parsed)) throw new Error("Robot image data is invalid.");
@@ -177,6 +181,23 @@ async function getRobots(db: D1Database | undefined, teamNumber: string, season:
 	} catch (error) {
 		console.error(JSON.stringify({ message: "Could not read robot entries", error: error instanceof Error ? error.message : String(error) }));
 		return [];
+	}
+}
+
+async function getSocialLinks(db: D1Database | undefined, league: League, teamNumber: string): Promise<SocialLinks> {
+	const links = Object.fromEntries(SOCIAL_PLATFORMS.map((platform) => [platform, ""])) as SocialLinks;
+	if (!db || typeof db.prepare !== "function") return links;
+	try {
+		const result = await db.prepare("SELECT platform, value FROM team_social_links WHERE league = ? AND team_number = ?")
+			.bind(league, teamNumber)
+			.all<{ platform: string; value: string }>();
+		for (const row of result.results) {
+			if (SOCIAL_PLATFORMS.includes(row.platform as SocialPlatform)) links[row.platform as SocialPlatform] = row.value;
+		}
+		return links;
+	} catch (error) {
+		console.error(JSON.stringify({ message: "Could not read team social links", error: error instanceof Error ? error.message : String(error) }));
+		return links;
 	}
 }
 
@@ -409,6 +430,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		teamNumber,
 		season,
 		team: teamProfile,
+		socialLinks: await getSocialLinks(env.SCOUTING_DB, league, dbTeamNumber),
 		events: eventsData,
 		awards: awardsData,
 		matches: matchesData,
@@ -443,11 +465,44 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: `Enter a valid ${league} team number.` }, 400);
 	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
 
-	let body: { field?: unknown; value?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown };
+	let body: { field?: unknown; value?: unknown; socials?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown };
 	try {
 		body = (await request.json()) as { field?: unknown; value?: unknown };
 	} catch {
 		return json({ error: "Invalid edit payload." }, 400);
+	}
+
+	if (body.field === "socialLinks") {
+		if (typeof body.socials !== "object" || body.socials === null) return json({ error: "Enter valid team social links." }, 400);
+		const submitted = body.socials as Record<string, unknown>;
+		const socialLinks = {} as SocialLinks;
+		for (const platform of SOCIAL_PLATFORMS) {
+			const value = submitted[platform];
+			if (typeof value !== "string" || value.length > 2048) return json({ error: `Enter a valid ${platform} link.` }, 400);
+			const trimmed = value.trim();
+			if (trimmed && (platform === "email"
+				? trimmed.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)
+				: !validImageUrl(trimmed))) {
+				return json({ error: platform === "email" ? "Enter a valid email address." : `Enter a valid ${platform} URL using http or https.` }, 400);
+			}
+			socialLinks[platform] = trimmed;
+		}
+
+		try {
+			await env.SCOUTING_DB.batch(SOCIAL_PLATFORMS.map((platform) => {
+				const value = socialLinks[platform];
+				return value
+					? env.SCOUTING_DB!.prepare(`INSERT INTO team_social_links (league, team_number, platform, value, updated_at)
+						VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+						ON CONFLICT(league, team_number, platform) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+						.bind(league, dbTeamNumber, platform, value)
+					: env.SCOUTING_DB!.prepare("DELETE FROM team_social_links WHERE league = ? AND team_number = ? AND platform = ?")
+						.bind(league, dbTeamNumber, platform);
+			}));
+		} catch (error) {
+			return json({ error: `Could not save team social links: ${error instanceof Error ? error.message : "database error"}` }, 503);
+		}
+		return json({ socialLinks: await getSocialLinks(env.SCOUTING_DB, league, dbTeamNumber) });
 	}
 
 	if (body.field === "eventSelection") {

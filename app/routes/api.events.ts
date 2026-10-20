@@ -46,6 +46,13 @@ function readableRegion(value: string) {
 	return US_REGION_NAMES[value.toUpperCase()] || value;
 }
 
+function compareRegions(first: string, second: string) {
+	const firstIsIowa = first.toLowerCase().includes("iowa") || first.toUpperCase() === "IA";
+	const secondIsIowa = second.toLowerCase().includes("iowa") || second.toUpperCase() === "IA";
+	if (firstIsIowa !== secondIsIowa) return firstIsIowa ? -1 : 1;
+	return first.localeCompare(second);
+}
+
 function json(data: unknown, status = 200) {
 	return new Response(JSON.stringify(data), {
 		status,
@@ -166,7 +173,7 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 			custom: true,
 		});
 	}
-	const regions = [...new Set(summaries.map((event) => event.region || "Other"))].sort((a, b) => a.localeCompare(b));
+	const regions = [...new Set(summaries.map((event) => event.region || "Other"))].sort(compareRegions);
 	const filtered = region ? summaries.filter((event) => (event.region || "Other") === region) : summaries;
 	filtered.sort((a, b) => (a.startDate || "9999").localeCompare(b.startDate || "9999") || a.name.localeCompare(b.name));
 	return json({ events: filtered, regions, warning });

@@ -45,7 +45,7 @@ export default function EventSearchPage() {
 	const { getToken } = useAuth();
 	const [league, setLeague] = useState<League>("FTC");
 	const [season, setSeason] = useState("2026");
-	const [region, setRegion] = useState("");
+	const [region, setRegion] = useState("Iowa");
 	const [regions, setRegions] = useState<string[]>([]);
 	const [events, setEvents] = useState<EventSummary[]>([]);
 	const [error, setError] = useState("");
@@ -73,7 +73,13 @@ export default function EventSearchPage() {
 				});
 				const data = await readResponse<{ regions?: string[]; error?: string }>(response);
 				if (!response.ok) throw new Error(data.error || "Could not load event regions.");
-				if (!cancelled) setRegions(data.regions || []);
+				if (!cancelled) {
+					const availableRegions = data.regions || [];
+					setRegions(availableRegions);
+					setRegion((current) => availableRegions.includes(current)
+						? current
+						: availableRegions.find((item) => item.toLowerCase().includes("iowa") || item.toUpperCase() === "IA") || "");
+				}
 			} catch (regionError) {
 				if (!cancelled) setError(regionError instanceof Error ? regionError.message : "Could not load event regions.");
 			}

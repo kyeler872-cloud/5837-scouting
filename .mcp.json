@@ -1,0 +1,39 @@
+{
+	"mcpServers": {
+		"cloudflare": {
+			"type": "http",
+			"url": "https://mcp.cloudflare.com/mcp",
+			"tools": [
+				"*"
+			]
+		},
+		"cloudflare-bindings": {
+			"type": "http",
+			"url": "https://bindings.mcp.cloudflare.com/mcp",
+			"tools": [
+				"*"
+			]
+		},
+		"cloudflare-builds": {
+			"type": "http",
+			"url": "https://builds.mcp.cloudflare.com/mcp",
+			"tools": [
+				"*"
+			]
+		},
+		"cloudflare-docs": {
+			"type": "http",
+			"url": "https://docs.mcp.cloudflare.com/mcp",
+			"tools": [
+				"*"
+			]
+		},
+		"cloudflare-observability": {
+			"type": "http",
+			"url": "https://observability.mcp.cloudflare.com/mcp",
+			"tools": [
+				"*"
+			]
+		}
+	}
+}

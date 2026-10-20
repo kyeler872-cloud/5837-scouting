@@ -57,6 +57,13 @@ body {
 .team-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 2rem; border-top: 1px solid var(--line); padding-top: 2rem; }
 .team-heading h2 { margin: 0; font-size: clamp(2rem, 5vw, 4rem); letter-spacing: -0.05em; line-height: 1; }
 .team-heading > div > p:last-child { color: var(--muted); }
+.team-social-links { display: grid; gap: 1rem; border: 1px solid var(--line); background: var(--navy-900); margin-top: 1.5rem; padding: 1rem; }
+.team-social-links .section-kicker { margin: 0; }
+.team-social-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; }
+.team-social-grid label { display: grid; gap: 0.4rem; color: var(--muted); font-size: 0.72rem; font-weight: 700; }
+.team-social-grid input { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--navy-950); color: var(--white); font: inherit; padding: 0.7rem; }
+.team-social-grid input:focus { outline: 2px solid var(--blue-600); outline-offset: 1px; }
+.team-social-links .search-button { min-height: 2.7rem; justify-self: start; }
 .first-mark { width: 1.15rem; height: 1.15rem; margin-right: 0.45rem; object-fit: contain; vertical-align: middle; }
 .team-facts .first-mark { width: 0.9rem; height: 0.9rem; }
 .editable-value { display: inline-flex; align-items: baseline; gap: 0.6rem; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; padding: 0.15rem 0; text-align: left; }
@@ -293,6 +300,7 @@ body {
 	.search-options { grid-template-columns: 1fr; }
 	.event-search-options { grid-template-columns: 1fr; }
 	.team-facts { grid-template-columns: repeat(2, 1fr); }
+	.team-social-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.result-columns { grid-template-columns: 1fr; }
 	.event-detail-grid { grid-template-columns: 1fr; }
 	.manual-team-form { grid-template-columns: 1fr; }
