@@ -55,7 +55,7 @@ export default function EventSearchPage() {
 
 	useEffect(() => {
 		setSeason((current) => (league === "FTC" ? ftcSeasons : frcSeasons).includes(Number(current) ? current : "2026"));
-		setRegion("");
+		setRegion("Iowa");
 		setEvents([]);
 		setRegions([]);
 		setSearched(false);

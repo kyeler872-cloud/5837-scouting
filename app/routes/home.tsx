@@ -112,6 +112,25 @@ function teamApiUrl(teamNumber: string, season: string, league: "FTC" | "FRC") {
     return `/api/teams/${encodeURIComponent(teamNumber)}?${search}`;
 }
 
+function socialFaviconUrl(platform: keyof SocialLinks, value: string) {
+    const domains: Partial<Record<keyof SocialLinks, string>> = {
+        facebook: "facebook.com",
+        x: "x.com",
+        instagram: "instagram.com",
+        youtube: "youtube.com",
+        email: "mail.google.com",
+    };
+    let domain = domains[platform];
+    if (!domain) {
+        try {
+            domain = new URL(value).hostname;
+        } catch {
+            return null;
+        }
+    }
+    return `https://www.google.com/s2/favicons?${new URLSearchParams({ domain, sz: "64" })}`;
+}
+
 // page title and metadata for the browser tab
 export function meta({}: Route.MetaArgs) {
     return [
@@ -131,6 +150,7 @@ export default function Home() {
     const [season, setSeason] = useState("2025");
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
     const [socialLinks, setSocialLinks] = useState<SocialLinks>({ website: "", facebook: "", x: "", instagram: "", youtube: "", email: "", other: "" });
+    const [isEditingSocials, setIsEditingSocials] = useState(false);
     const [error, setError] = useState("");
     const [isSearching, setIsSearching] = useState(false);
     const [isSavingSocials, setIsSavingSocials] = useState(false);
@@ -164,6 +184,7 @@ export default function Home() {
             const teamResult = data as TeamLookupResponse;
             setResult(teamResult);
             setSocialLinks(teamResult.socialLinks);
+            setIsEditingSocials(false);
         } catch (lookupError) {
             setError(lookupError instanceof Error ? lookupError.message : "Team lookup failed.");
         } finally {
@@ -229,7 +250,7 @@ export default function Home() {
             const token = await getToken();
             const response = await fetch(teamApiUrl(result.teamNumber, result.season, result.league), {
                 method: "PUT",
-                headers: { "content-type": "application/json", ...(token ? { Authorization: `****** } : {}) },
+                headers: { "content-type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
                 body: JSON.stringify({ field: "socialLinks", socials: socialLinks }),
             });
             const data = await readResponse<{ socialLinks?: SocialLinks; error?: string }>(response);
@@ -237,6 +258,7 @@ export default function Home() {
             const savedLinks = data.socialLinks || socialLinks;
             setSocialLinks(savedLinks);
             setResult({ ...result, socialLinks: savedLinks });
+            setIsEditingSocials(false);
         } catch (saveError) {
             setError(saveError instanceof Error ? saveError.message : "Could not save team social links.");
         } finally {
@@ -339,32 +361,79 @@ export default function Home() {
                             </div>
                             {(() => { const logo = textValue(result.team, ["logo", "logoUrl", "teamLogo"]); return logo ? <img className="team-logo" src={logo} alt="Team logo" /> : null; })()}
                         </header>
-                        <form className="team-social-links" onSubmit={(event) => void saveSocialLinks(event)}>
-                            <p className="section-kicker">Team links</p>
-                            <div className="team-social-grid">
-                                {([
-                                    ["website", "Website", "https://"],
-                                    ["facebook", "Facebook", "https://"],
-                                    ["x", "X", "https://"],
-                                    ["instagram", "Instagram", "https://"],
-                                    ["youtube", "YouTube", "https://"],
-                                    ["email", "Email", "team@example.com"],
-                                    ["other", "Other", "https://"],
-                                ] as const).map(([field, label, placeholder]) => (
-                                    <label key={field}>
-                                        <span>{label}</span>
-                                        <input
-                                            type={field === "email" ? "email" : "url"}
-                                            maxLength={field === "email" ? 320 : 2048}
-                                            placeholder={placeholder}
-                                            value={socialLinks[field]}
-                                            onChange={(event) => setSocialLinks((current) => ({ ...current, [field]: event.target.value }))}
-                                        />
-                                    </label>
-                                ))}
+                        <section className="team-social-links" aria-label="Team social links">
+                            <div className="team-social-header">
+                                <p className="section-kicker">Team socials</p>
+                                <button
+                                    className="social-edit-button"
+                                    type="button"
+                                    aria-expanded={isEditingSocials}
+                                    onClick={() => {
+                                        if (isEditingSocials) setSocialLinks(result.socialLinks);
+                                        setIsEditingSocials(!isEditingSocials);
+                                    }}
+                                >
+                                    {isEditingSocials ? "Cancel" : "✎ Edit"}
+                                </button>
                             </div>
-                            <button className="search-button" type="submit" disabled={isSavingSocials}>{isSavingSocials ? "Saving..." : "Save team links"}</button>
-                        </form>
+                            {isEditingSocials ? (
+                                <form onSubmit={(event) => void saveSocialLinks(event)}>
+                                    <div className="team-social-grid">
+                                        {([
+                                            ["website", "Website", "https://"],
+                                            ["facebook", "Facebook", "https://"],
+                                            ["x", "X", "https://"],
+                                            ["instagram", "Instagram", "https://"],
+                                            ["youtube", "YouTube", "https://"],
+                                            ["email", "Email", "team@example.com"],
+                                            ["other", "Other", "https://"],
+                                        ] as const).map(([field, label, placeholder]) => (
+                                            <label key={field}>
+                                                <span>{label}</span>
+                                                <input
+                                                    type={field === "email" ? "email" : "url"}
+                                                    maxLength={field === "email" ? 320 : 2048}
+                                                    placeholder={placeholder}
+                                                    value={socialLinks[field]}
+                                                    onChange={(event) => setSocialLinks((current) => ({ ...current, [field]: event.target.value }))}
+                                                />
+                                            </label>
+                                        ))}
+                                    </div>
+                                    <button className="search-button" type="submit" disabled={isSavingSocials}>{isSavingSocials ? "Saving..." : "Save team links"}</button>
+                                </form>
+                            ) : (
+                                <div className="team-social-icons">
+                                    {([
+                                        ["website", "Website"],
+                                        ["facebook", "Facebook"],
+                                        ["x", "X"],
+                                        ["instagram", "Instagram"],
+                                        ["youtube", "YouTube"],
+                                        ["email", "Email"],
+                                        ["other", "Other"],
+                                    ] as const).filter(([field]) => socialLinks[field]).map(([field, label]) => {
+                                        const value = socialLinks[field];
+                                        const href = field === "email" ? `mailto:${value}` : value;
+                                        const favicon = socialFaviconUrl(field, value);
+                                        return favicon ? (
+                                            <a
+                                                className="team-social-icon"
+                                                href={href}
+                                                key={field}
+                                                aria-label={label}
+                                                title={label}
+                                                target={field === "email" ? undefined : "_blank"}
+                                                rel={field === "email" ? undefined : "noreferrer"}
+                                            >
+                                                <img src={favicon} alt="" width="32" height="32" loading="lazy" />
+                                            </a>
+                                        ) : null;
+                                    })}
+                                    {!Object.values(socialLinks).some(Boolean) && <span className="team-social-empty">No team links added.</span>}
+                                </div>
+                            )}
+                        </section>
                         <div className="team-facts">
                             <div><span>Rookie year</span><strong>{textValue(result.team, ["rookieYear", "rookie_year"]) || "Unavailable"}</strong></div>
                             <div><span>Events</span><SourceMark league={result.league} /><strong>{records(result.events).length || "None listed"}</strong></div>
