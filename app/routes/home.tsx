@@ -4,10 +4,18 @@ import { UserButton, useAuth, useUser, useOrganization } from "@clerk/react-rout
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { Protected } from "../protected";
+import { ScoreTrendChart, type EventPerformance } from "../components/score-trend-chart";
+import { AutoPathField, type AutoPath, type RobotAuto } from "../components/auto-path-field";
 
 // quick type definition for generic json objects from api
 type JsonRecord = Record<string, unknown>;
-
+type RobotScoringCapabilities = {
+    flower: boolean;
+    flowerActions: ("Take from" | "Input into")[];
+    hive: boolean;
+    hivePosition: "Underhand" | "Overhand" | null;
+    hiveShooterType: "Fixed" | "Dynamic" | null;
+};
 // type setup so typescript knows what the team search api response looks like
 type TeamLookupResponse = {
     league: "FTC" | "FRC";
@@ -22,6 +30,7 @@ type TeamLookupResponse = {
     selectedEvents: Record<string, { eventName: string; displayName: string }>;
     customEvents: { code: string; name: string; date: string | null; displayName: string }[];
     performance: { auto: { average: string | null; matchCount: number }; teleop: { average: string | null; matchCount: number } };
+    performanceByEvent: EventPerformance[];
     robots: RobotEntry[];
     warnings: string[];
     meta: { fetchedAt: string; source: string; editableFields: string[] };
@@ -44,6 +53,8 @@ type RobotEntry = {
     imageUrls: RobotImage[];
     startMonth: string;
     endMonth: string | null;
+    scoringCapabilities: RobotScoringCapabilities;
+    autos: RobotAuto[];
 };
 
 type RobotImage = {
@@ -147,7 +158,7 @@ export default function Home() {
     // react state hooks for tracking search inputs, team data results, errors, and loading state
     const [teamNumber, setTeamNumber] = useState("");
     const [league, setLeague] = useState<"FTC" | "FRC">("FTC");
-    const [season, setSeason] = useState("2025");
+    const [season, setSeason] = useState("2026");
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
     const [socialLinks, setSocialLinks] = useState<SocialLinks>({ website: "", facebook: "", x: "", instagram: "", youtube: "", email: "", other: "" });
     const [isEditingSocials, setIsEditingSocials] = useState(false);
@@ -200,7 +211,7 @@ export default function Home() {
                 .sort((first, second) => first.boundingClientRect.top - second.boundingClientRect.top)[0];
             if (visible) setActiveSection(visible.target.id);
         }, { rootMargin: "-15% 0px -70% 0px", threshold: 0 });
-        const sections = ["auto", "teleop", "events", "robot"]
+        const sections = ["auto", "teleop", "graphs", "events", "robot"]
             .map((id) => document.getElementById(id))
             .filter((section): section is HTMLElement => section !== null);
         sections.forEach((section) => observer.observe(section));
@@ -300,6 +311,7 @@ export default function Home() {
                     imageUrls: robot.imageUrls.map(({ id, url }) => ({ id, url })),
                     startMonth: robot.startMonth,
                     endMonth: robot.endMonth,
+                    scoringCapabilities: robot.scoringCapabilities,
                 }),
             });
             const data = await readResponse<{ robots?: RobotEntry[]; error?: string }>(response);
@@ -310,6 +322,28 @@ export default function Home() {
             throw saveError;
         }
     }
+
+        async function saveRobotAuto(robotId: string, auto?: RobotAuto, deleteAutoId?: string) {
+            if (!result) return;
+            try {
+                const token = await getToken();
+                const response = await fetch(teamApiUrl(result.teamNumber, result.season, result.league), {
+                    method: "PUT",
+                    headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+                    body: JSON.stringify({
+                        field: "robotAuto",
+                        robotId,
+                        auto: deleteAutoId ? { id: deleteAutoId, delete: true } : auto,
+                    }),
+                });
+                const data = await readResponse<{ robots?: RobotEntry[]; error?: string }>(response);
+                if (!response.ok) throw new Error(data.error || "Could not save autonomous path.");
+                setResult({ ...result, robots: data.robots || result.robots });
+            } catch (saveError) {
+                setError(saveError instanceof Error ? saveError.message : "Could not save autonomous path.");
+                throw saveError;
+            }
+        }
 
     // renders the page UI inside protected auth wrapper
     return (
@@ -323,8 +357,9 @@ export default function Home() {
                     <div className="topbar-right">
                         <div className="topbar-tabs" aria-label="Search mode">
                             <a href="/home" aria-current="page">Team search</a>
+                            <a href="/compare">Compare</a>
                             <a href="/events">Event search</a>
-                            <a href="/logs">Logs</a>
+                            <a href="/settings">Settings</a>
                         </div>
                         <UserBadge />
                         <UserButton />
@@ -444,7 +479,7 @@ export default function Home() {
                             <aside className="section-sidebar" aria-label="Team page sections">
                                 <p>On this page</p>
                                 <nav>
-                                    {(["auto", "teleop", "events", "robot"] as const).map((id) => (
+                                    {(["auto", "teleop", "graphs", "events", "robot"] as const).map((id) => (
                                         <button
                                             type="button"
                                             key={id}
@@ -471,13 +506,23 @@ export default function Home() {
                                 <PerformanceSection
                                     id="teleop"
                                     title="TeleOp"
-                                    description={`Average teleoperated points per match from ${result.league === "FTC" ? "FIRST" : "The Blue Alliance"} event results.`}
+                                    description={result.league === "FTC"
+                                        ? "Average TeleOp and Endgame points per match from FIRST event results."
+                                        : "Average teleoperated points per match from The Blue Alliance event results."}
                                     score={result.performance.teleop.average}
                                     matchCount={result.performance.teleop.matchCount}
                                     league={result.league}
                                     note={result.overrides.teleopNotes}
                                     onSave={saveOverride}
                                 />
+                                <section className="team-section score-trend-section" id="graphs">
+                                    <div className="score-trend-heading">
+                                        <SectionHeading eyebrow="Season performance" title="Team score graphs by event" />
+                                        <a className="compare-page-link" href={`/compare?${new URLSearchParams({ team: result.teamNumber, league: result.league, season: result.season })}`}>Compare with a different team <span aria-hidden="true">→</span></a>
+                                    </div>
+                                    <p className="section-description">Compare Auto and TeleOp alliance averages across the season.</p>
+                                    <ScoreTrendChart league={result.league} teams={[{ teamNumber: result.teamNumber, events: result.performanceByEvent }]} />
+                                </section>
                                 <section className="team-section" id="events">
                                     <SectionHeading eyebrow="Competition record" title="Events" />
                                     <details className="events-awards" open>
@@ -490,7 +535,7 @@ export default function Home() {
                                 </section>
                                 <section className="team-section" id="robot">
                                     <SectionHeading eyebrow="Build history" title="Robot" />
-                                    <RobotSection robots={result.robots} onSave={saveRobot} />
+                                    <RobotSection robots={result.robots} onSave={saveRobot} onSaveAuto={saveRobotAuto} league={result.league} season={result.season} />
                                 </section>
                             </div>
                         </div>
@@ -556,9 +601,16 @@ function PerformanceSection({ id, title, description, score, matchCount, league,
     );
 }
 
-function RobotSection({ robots, onSave }: {
+function emptyScoringCapabilities(): RobotScoringCapabilities {
+    return { flower: false, flowerActions: [], hive: false, hivePosition: null, hiveShooterType: null };
+}
+
+function RobotSection({ robots, onSave, onSaveAuto, league, season }: {
     robots: RobotEntry[];
     onSave: (robot: Omit<RobotEntry, "id">, robotId?: string) => Promise<void>;
+    onSaveAuto: (robotId: string, auto?: RobotAuto, deleteAutoId?: string) => Promise<void>;
+    league: "FTC" | "FRC";
+    season: string;
 }) {
     const [creating, setCreating] = useState(false);
     const [editingRobot, setEditingRobot] = useState<RobotEntry | null>(null);
@@ -566,8 +618,10 @@ function RobotSection({ robots, onSave }: {
     const [description, setDescription] = useState("");
     const [startMonth, setStartMonth] = useState("");
     const [endMonth, setEndMonth] = useState("");
+    const [scoringCapabilities, setScoringCapabilities] = useState<RobotScoringCapabilities>(emptyScoringCapabilities);
     const [saving, setSaving] = useState(false);
     const [formError, setFormError] = useState("");
+    const showScoringCapabilities = league === "FTC" && season === "2026";
     const currentRobots = robots.filter((robot) => !robot.endMonth);
     const obsoleteRobots = robots.filter((robot) => Boolean(robot.endMonth));
 
@@ -577,6 +631,7 @@ function RobotSection({ robots, onSave }: {
         setDescription("");
         setStartMonth("");
         setEndMonth("");
+        setScoringCapabilities(emptyScoringCapabilities());
         setFormError("");
         setCreating(true);
     }
@@ -601,11 +656,14 @@ function RobotSection({ robots, onSave }: {
                 imageUrls: [],
                 startMonth,
                 endMonth: endMonth || null,
+                scoringCapabilities,
+                autos: [],
             });
             setName("");
             setDescription("");
             setStartMonth("");
             setEndMonth("");
+            setScoringCapabilities(emptyScoringCapabilities());
             setCreating(false);
         } catch (saveError) {
             setFormError(saveError instanceof Error ? saveError.message : "Could not save robot.");
@@ -618,12 +676,12 @@ function RobotSection({ robots, onSave }: {
         <div className="robot-section-content">
             <p className="section-description">This team's past robot designs (This data is manually added):</p>
             {currentRobots.length > 0
-                ? <div className="robot-grid">{currentRobots.map((robot) => <RobotCard key={robot.id} robot={robot} editing={editingRobot?.id === robot.id} onEdit={openEditForm} onSave={onSave} onCancel={() => setEditingRobot(null)} />)}</div>
+                ? <div className="robot-grid">{currentRobots.map((robot) => <RobotCard key={robot.id} robot={robot} editing={editingRobot?.id === robot.id} onEdit={openEditForm} onSave={onSave} onSaveAuto={onSaveAuto} onCancel={() => setEditingRobot(null)} showScoringCapabilities={showScoringCapabilities} league={league} />)}</div>
                 : <div className="empty-robots"><span>Robot history starts here</span><p>Add the current robot, its build dates, description, and photos.</p></div>}
             {obsoleteRobots.length > 0 && (
                 <details className="obsolete-robots">
                     <summary>Show previous robots <span>{obsoleteRobots.length}</span></summary>
-                    <div className="robot-grid">{obsoleteRobots.map((robot) => <RobotCard key={robot.id} robot={robot} editing={editingRobot?.id === robot.id} onEdit={openEditForm} onSave={onSave} onCancel={() => setEditingRobot(null)} />)}</div>
+                    <div className="robot-grid">{obsoleteRobots.map((robot) => <RobotCard key={robot.id} robot={robot} editing={editingRobot?.id === robot.id} onEdit={openEditForm} onSave={onSave} onSaveAuto={onSaveAuto} onCancel={() => setEditingRobot(null)} showScoringCapabilities={showScoringCapabilities} league={league} />)}</div>
                 </details>
             )}
             {!creating && <button className="add-robot-button" type="button" onClick={openCreateForm}>＋ Add another robot</button>}
@@ -631,11 +689,12 @@ function RobotSection({ robots, onSave }: {
                 <form className="robot-form" onSubmit={(event) => void submitRobot(event)}>
                     <h4>Add a robot</h4>
                     <div className="robot-form-fields">
-                        <label>Robot name<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Atlas" /></label>
-                        <label>Start month<input required type="month" value={startMonth} onChange={(event) => setStartMonth(event.target.value)} /></label>
+                        <label>Robot name <span>(optional)</span><input maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Atlas" /></label>
+                        <label>Start month <span>(optional)</span><input type="month" value={startMonth} onChange={(event) => setStartMonth(event.target.value)} /></label>
                         <label>End month <span>(leave blank if current)</span><input type="month" value={endMonth} onChange={(event) => setEndMonth(event.target.value)} /></label>
                     </div>
                     <label>Description<textarea maxLength={2000} rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What makes this robot unique?" /></label>
+                    {showScoringCapabilities && <ScoringCapabilitiesEditor value={scoringCapabilities} onChange={setScoringCapabilities} />}
                     {formError && <p className="lookup-error" role="alert">{formError}</p>}
                     <div className="robot-form-actions">
                         <button className="search-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save robot"}</button>
@@ -647,12 +706,15 @@ function RobotSection({ robots, onSave }: {
     );
 }
 
-function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
+function RobotCard({ robot, editing, onEdit, onSave, onSaveAuto, onCancel, showScoringCapabilities, league }: {
     robot: RobotEntry;
     editing: boolean;
     onEdit: (robot: RobotEntry) => void;
     onSave: (robot: Omit<RobotEntry, "id">, robotId?: string) => Promise<void>;
+    onSaveAuto: (robotId: string, auto?: RobotAuto, deleteAutoId?: string) => Promise<void>;
     onCancel: () => void;
+    showScoringCapabilities: boolean;
+    league: "FTC" | "FRC";
 }) {
     const [fullscreenPhoto, setFullscreenPhoto] = useState<{ photo: RobotImage; alt: string } | null>(null);
     const [photoError, setPhotoError] = useState("");
@@ -663,6 +725,7 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
     const [startMonth, setStartMonth] = useState(robot.startMonth);
     const [endMonth, setEndMonth] = useState(robot.endMonth || "");
     const [images, setImages] = useState(robot.imageUrls);
+    const [scoringCapabilities, setScoringCapabilities] = useState(robot.scoringCapabilities || emptyScoringCapabilities());
     const closeButtonRef = useRef<HTMLButtonElement>(null);
 
     useEffect(() => {
@@ -671,9 +734,10 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
         setStartMonth(robot.startMonth);
         setEndMonth(robot.endMonth || "");
         setImages(robot.imageUrls);
+        setScoringCapabilities(robot.scoringCapabilities || emptyScoringCapabilities());
         setFormError("");
         setPhotoError("");
-    }, [editing, robot.id, robot.imageUrls]);
+    }, [editing, robot.id, robot.imageUrls, robot.scoringCapabilities]);
 
     useEffect(() => {
         if (!fullscreenPhoto) return;
@@ -697,7 +761,7 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
         setSaving(true);
         setFormError("");
         try {
-            await onSave({ name, description, imageUrls: images, startMonth, endMonth: endMonth || null }, robot.id);
+            await onSave({ name, description, imageUrls: images, startMonth, endMonth: endMonth || null, scoringCapabilities, autos: robot.autos }, robot.id);
             onCancel();
         } catch (error) {
             setFormError(error instanceof Error ? error.message : "Could not save robot.");
@@ -709,10 +773,10 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
     return (
         <article className="robot-card">
             <div className="robot-card-heading">
-                <div><h4>{robot.name}</h4><p>{formatMonth(robot.startMonth)} – {robot.endMonth ? formatMonth(robot.endMonth) : "Present"}</p></div>
+                <div><h4>{robot.name || "Unnamed robot"}</h4><p>{formatMonth(robot.startMonth)} – {robot.endMonth ? formatMonth(robot.endMonth) : "Present"}</p></div>
                 <div className="robot-card-actions">
                     {!robot.endMonth && <span className="current-robot-badge">Current</span>}
-                    {!editing && <button className="edit-robot-button" type="button" onClick={() => onEdit(robot)} aria-label={`Edit ${robot.name}`}>Edit</button>}
+                    {!editing && <button className="edit-robot-button" type="button" onClick={() => onEdit(robot)} aria-label={`Edit ${robot.name || "unnamed robot"}`}>Edit</button>}
                 </div>
             </div>
             {editing ? (
@@ -724,13 +788,13 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
                         </header>
                         <label className="robot-metadata-field robot-name-field">
                             <span>Robot name</span>
-                            <input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Atlas" />
+                            <input maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Atlas" />
                         </label>
                         <fieldset className="robot-date-fields">
                             <legend>Build timeline</legend>
                             <label className="robot-metadata-field robot-date-field">
                                 <span>First built</span>
-                                <input required type="month" value={startMonth} onChange={(event) => setStartMonth(event.target.value)} />
+                                <input type="month" value={startMonth} onChange={(event) => setStartMonth(event.target.value)} />
                                 <small>When they started using this bot (beep boop)</small>
                             </label>
                             <label className="robot-metadata-field robot-date-field">
@@ -744,6 +808,7 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
                             <textarea maxLength={2000} rows={5} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Share what this design does well, how it evolved, and what makes it unique." />
                             <small>put robot notes here :D</small>
                         </label>
+                        {showScoringCapabilities && <ScoringCapabilitiesEditor value={scoringCapabilities} onChange={setScoringCapabilities} />}
                     </section>
                     <h5 className="robot-photo-editor-heading">Robot photos</h5>
                     {images.length > 0 && (
@@ -775,6 +840,7 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
             ) : (
                 <>
                     {robot.description && <p className="robot-description">{robot.description}</p>}
+                    {showScoringCapabilities && <RobotCapabilitySummary capabilities={robot.scoringCapabilities} league={league} />}
                     {robot.imageUrls.length > 0 && (
                         <div className="robot-images">
                             {robot.imageUrls.map((photo, index) => {
@@ -785,6 +851,7 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
                     )}
                 </>
             )}
+            {showScoringCapabilities && <RobotAutos robot={robot} onSaveAuto={onSaveAuto} />}
             {fullscreenPhoto && (
                 <div className="robot-lightbox" role="dialog" aria-modal="true" aria-label="Fullscreen robot photo" onClick={() => setFullscreenPhoto(null)}>
                     <button ref={closeButtonRef} className="robot-lightbox-close" type="button" aria-label="Close fullscreen image" onClick={() => setFullscreenPhoto(null)}>×</button>
@@ -822,6 +889,183 @@ function RobotCard({ robot, editing, onEdit, onSave, onCancel }: {
     }
 }
 
+function RobotAutos({ robot, onSaveAuto }: {
+    robot: RobotEntry;
+    onSaveAuto: (robotId: string, auto?: RobotAuto, deleteAutoId?: string) => Promise<void>;
+}) {
+    const [draft, setDraft] = useState<RobotAuto | null>(null);
+    const [score, setScore] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState("");
+
+    function startNewAuto() {
+        setDraft({ id: crypto.randomUUID(), name: "", alliance: "red", score: null, path: { points: [], controls: [] } });
+        setScore("");
+        setError("");
+    }
+
+    function editAuto(auto: RobotAuto) {
+        setDraft(structuredClone(auto));
+        setScore(auto.score === null ? "" : String(auto.score));
+        setError("");
+    }
+
+    async function submitAuto(event: React.FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        if (!draft || draft.path.points.length < 2) {
+            setError("Place a starting point and at least one more path point.");
+            return;
+        }
+        const numericScore = score.trim() ? Number(score) : null;
+        if (numericScore !== null && (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > 1000)) {
+            setError("Enter an optional score from 0 to 1,000.");
+            return;
+        }
+        setSaving(true);
+        setError("");
+        try {
+            await onSaveAuto(robot.id, { ...draft, score: numericScore });
+            setDraft(null);
+        } catch (saveError) {
+            setError(saveError instanceof Error ? saveError.message : "Could not save autonomous path.");
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    async function removeAuto(auto: RobotAuto) {
+        if (!window.confirm(`Remove ${auto.name} from this robot?`)) return;
+        setSaving(true);
+        setError("");
+        try {
+            await onSaveAuto(robot.id, undefined, auto.id);
+            if (draft?.id === auto.id) setDraft(null);
+        } catch (deleteError) {
+            setError(deleteError instanceof Error ? deleteError.message : "Could not remove autonomous path.");
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    return (
+        <section className="robot-autos" aria-label="Autonomous paths">
+            <header><div><span className="robot-editor-kicker">2026–27 FTC</span><h5>Autonomous paths</h5></div>
+                {!draft && <button type="button" className="add-robot-button" onClick={startNewAuto}>＋ Add auto</button>}
+            </header>
+            {robot.autos.length > 0 && <div className="robot-auto-list">{robot.autos.map((auto) => (
+                <article className="robot-auto-card" key={auto.id}>
+                    <div className="robot-auto-heading">
+                        <div><h6>{auto.name}</h6><p>{auto.alliance === "red" ? "Red" : "Blue"} alliance{auto.score !== null ? ` · Typical score: ${auto.score}` : ""}</p></div>
+                        <div><button type="button" onClick={() => editAuto(auto)} disabled={saving}>Edit</button><button type="button" onClick={() => void removeAuto(auto)} disabled={saving}>Remove</button></div>
+                    </div>
+                    <AutoPathField path={auto.path} color={auto.alliance === "red" ? "#ff564f" : "#4b83ff"} />
+                </article>
+            ))}</div>}
+            {draft && <form className="robot-auto-editor" onSubmit={(event) => void submitAuto(event)}>
+                <div className="robot-auto-fields">
+                    <label>Alliance
+                        <select value={draft.alliance} onChange={(event) => setDraft({ ...draft, alliance: event.target.value as RobotAuto["alliance"] })}>
+                            <option value="red">Red</option><option value="blue">Blue</option>
+                        </select>
+                    </label>
+                    <label>Auto name <span>(optional)</span>
+                        <input maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder={`e.g. ${draft.alliance === "red" ? "Red" : "Blue"}1`} />
+                    </label>
+                    <label>Typical score <span>(optional)</span>
+                        <input type="number" min="0" max="1000" step="any" value={score} onChange={(event) => setScore(event.target.value)} placeholder="Score" />
+                    </label>
+                </div>
+                <AutoPathField path={draft.path} color={draft.alliance === "red" ? "#ff564f" : "#4b83ff"} editable onChange={(path: AutoPath) => setDraft((current) => current ? { ...current, path } : current)} />
+                {error && <p className="lookup-error" role="alert">{error}</p>}
+                <div className="robot-form-actions">
+                    <button className="search-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save auto"}</button>
+                    <button className="robot-cancel-button" type="button" onClick={() => setDraft(null)} disabled={saving}>Cancel</button>
+                </div>
+            </form>}
+        </section>
+    );
+}
+
+function ScoringCapabilitiesEditor({ value, onChange }: {
+    value: RobotScoringCapabilities;
+    onChange: (value: RobotScoringCapabilities) => void;
+}) {
+    function update(patch: Partial<RobotScoringCapabilities>) {
+        onChange({ ...value, ...patch });
+    }
+
+    return (
+        <fieldset className="robot-capabilities-editor">
+            <legend>Scoring capabilities</legend>
+            <label className="robot-capability-toggle">
+                <input type="checkbox" checked={value.flower} onChange={(event) => update({
+                    flower: event.target.checked,
+                    flowerActions: event.target.checked ? value.flowerActions : [],
+                })} />
+                <span>Flower</span>
+            </label>
+            {value.flower && <fieldset className="robot-capability-options">
+                <legend>Flower handling (optional)</legend>
+                {(["Take from", "Input into"] as const).map((action) => <label key={action} className="robot-capability-toggle">
+                    <input
+                        type="checkbox"
+                        checked={value.flowerActions.includes(action)}
+                        onChange={(event) => update({
+                            flowerActions: event.target.checked
+                                ? [...value.flowerActions, action]
+                                : value.flowerActions.filter((item) => item !== action),
+                        })}
+                    />
+                    <span>{action}</span>
+                </label>)}
+            </fieldset>}
+            <label className="robot-capability-toggle">
+                <input type="checkbox" checked={value.hive} onChange={(event) => update({
+                    hive: event.target.checked,
+                    hivePosition: event.target.checked ? value.hivePosition : null,
+                    hiveShooterType: event.target.checked ? value.hiveShooterType : null,
+                })} />
+                <span>Hive</span>
+            </label>
+            {value.hive && <div className="robot-capability-selects">
+                <label>
+                    <span>Position (optional)</span>
+                    <select value={value.hivePosition || ""} onChange={(event) => update({
+                        hivePosition: (event.target.value || null) as RobotScoringCapabilities["hivePosition"],
+                        hiveShooterType: event.target.value ? value.hiveShooterType : null,
+                    })}>
+                        <option value="">Select position</option>
+                        <option value="Underhand">Underhand</option>
+                        <option value="Overhand">Overhand</option>
+                    </select>
+                </label>
+                {value.hivePosition && <label>
+                    <span>Shooter type (optional)</span>
+                    <select value={value.hiveShooterType || ""} onChange={(event) => update({
+                        hiveShooterType: (event.target.value || null) as RobotScoringCapabilities["hiveShooterType"],
+                    })}>
+                        <option value="">Select type</option>
+                        <option value="Fixed">Fixed</option>
+                        <option value="Dynamic">Dynamic</option>
+                    </select>
+                </label>}
+            </div>}
+        </fieldset>
+    );
+}
+
+function RobotCapabilitySummary({ capabilities, league }: { capabilities: RobotScoringCapabilities; league: "FTC" | "FRC" }) {
+    const items: string[] = [];
+    if (capabilities.flower) {
+        items.push(`Flower${capabilities.flowerActions.length ? ` · ${capabilities.flowerActions.join(" / ")}` : ""}`);
+    }
+    if (capabilities.hive) {
+        items.push(`Hive${capabilities.hivePosition ? ` · ${capabilities.hivePosition}` : ""}${capabilities.hiveShooterType ? ` · ${capabilities.hiveShooterType}` : ""}`);
+    }
+    if (!items.length) return null;
+    return <p className="robot-capability-summary"><strong>{league} scoring capabilities</strong>{items.map((item) => <span key={item}>{item}</span>)}</p>;
+}
+
 function TrashIcon() {
     return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
         <path d="M3 6h18M8 6V4h8v2m3 0-.9 14H5.9L5 6m4 4v6m6-6v6" />
@@ -829,6 +1073,7 @@ function TrashIcon() {
 }
 
 function formatMonth(value: string) {
+    if (!value) return "Date not specified";
     const [year, month] = value.split("-").map(Number);
     return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(year, month - 1, 1)));
 }

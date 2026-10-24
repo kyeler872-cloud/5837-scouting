@@ -20,8 +20,15 @@ type FtcResponse<T> = {
 
 const FTC_API_BASE = "https://ftc-api.firstinspires.org/v2.0";
 const TBA_API_BASE = "https://www.thebluealliance.com/api/v3";
-const DEFAULT_SEASON = "2025";
+const DEFAULT_SEASON = "2026";
 type League = "FTC" | "FRC";
+type EventPerformance = {
+	eventCode: string;
+	eventName: string;
+	eventDate: string | null;
+	auto: string | null;
+	teleop: string | null;
+};
 
 function getLeague(url: URL): League | null {
 	const league = url.searchParams.get("league")?.trim().toUpperCase() || "FTC";
@@ -35,6 +42,25 @@ type RobotEntry = {
 	imageUrls: RobotImage[];
 	startMonth: string;
 	endMonth: string | null;
+	scoringCapabilities: RobotScoringCapabilities;
+	autos: RobotAuto[];
+};
+
+type AutoPoint = { x: number; y: number };
+type RobotAuto = {
+	id: string;
+	name: string;
+	alliance: "red" | "blue";
+	score: number | null;
+	path: { points: AutoPoint[]; controls: AutoPoint[] };
+};
+
+type RobotScoringCapabilities = {
+	flower: boolean;
+	flowerActions: ("Take from" | "Input into")[];
+	hive: boolean;
+	hivePosition: "Underhand" | "Overhand" | null;
+	hiveShooterType: "Fixed" | "Dynamic" | null;
 };
 
 type RobotImage = {
@@ -43,6 +69,116 @@ type RobotImage = {
 	addedBy: string | null;
 	displayName: string;
 };
+
+const EMPTY_SCORING_CAPABILITIES: RobotScoringCapabilities = {
+	flower: false,
+	flowerActions: [],
+	hive: false,
+	hivePosition: null,
+	hiveShooterType: null,
+};
+
+function parseRobotScoringCapabilities(value: unknown): RobotScoringCapabilities | null {
+	if (typeof value !== "object" || value === null) return null;
+	const capabilities = value as Record<string, unknown>;
+	if (typeof capabilities.flower !== "boolean" || typeof capabilities.hive !== "boolean") return null;
+	const validActions = ["Take from", "Input into"] as const;
+	if (!Array.isArray(capabilities.flowerActions) || !capabilities.flowerActions.every((action) => validActions.includes(action as typeof validActions[number]))) return null;
+	const validPositions = ["Underhand", "Overhand"];
+	if (capabilities.hivePosition !== null && !validPositions.includes(String(capabilities.hivePosition))) return null;
+	const validShooterTypes = ["Fixed", "Dynamic"];
+	if (capabilities.hiveShooterType !== null && !validShooterTypes.includes(String(capabilities.hiveShooterType))) return null;
+	return {
+		flower: capabilities.flower,
+		flowerActions: capabilities.flower ? capabilities.flowerActions as RobotScoringCapabilities["flowerActions"] : [],
+		hive: capabilities.hive,
+		hivePosition: capabilities.hive ? capabilities.hivePosition as RobotScoringCapabilities["hivePosition"] : null,
+		hiveShooterType: capabilities.hive && capabilities.hivePosition
+			? capabilities.hiveShooterType as RobotScoringCapabilities["hiveShooterType"]
+			: null,
+	};
+}
+
+function parseRobotAutos(value: string): RobotAuto[] {
+	const parsed: unknown = JSON.parse(value);
+	if (!Array.isArray(parsed)) throw new Error("Robot autonomous data is invalid.");
+	return parsed.map((item: unknown) => {
+		if (typeof item !== "object" || item === null) throw new Error("Robot autonomous data is invalid.");
+		const auto = item as Record<string, unknown>;
+		if (
+			typeof auto.id !== "string" ||
+			typeof auto.name !== "string" ||
+			(auto.alliance !== "red" && auto.alliance !== "blue") ||
+			(auto.score !== null && (typeof auto.score !== "number" || !Number.isFinite(auto.score))) ||
+			typeof auto.path !== "object" ||
+			auto.path === null
+		) throw new Error("Robot autonomous data is invalid.");
+		const path = auto.path as Record<string, unknown>;
+		if (!Array.isArray(path.points) || !Array.isArray(path.controls)) throw new Error("Robot autonomous path is invalid.");
+		const validPoint = (point: unknown): point is AutoPoint =>
+			typeof point === "object" &&
+			point !== null &&
+			"x" in point &&
+			typeof point.x === "number" &&
+			Number.isFinite(point.x) &&
+			point.x >= 0 &&
+			point.x <= 1000 &&
+			"y" in point &&
+			typeof point.y === "number" &&
+			Number.isFinite(point.y) &&
+			point.y >= 0 &&
+			point.y <= 1000;
+		if (!path.points.every(validPoint) || !path.controls.every(validPoint) || path.controls.length !== Math.max(0, path.points.length - 1)) {
+			throw new Error("Robot autonomous path is invalid.");
+		}
+		return {
+			id: auto.id,
+			name: auto.name,
+			alliance: auto.alliance,
+			score: auto.score,
+			path: { points: path.points, controls: path.controls },
+		};
+	});
+}
+
+function validateRobotAuto(value: unknown): Omit<RobotAuto, "name"> & { name: string } | null {
+	if (typeof value !== "object" || value === null) return null;
+	const auto = value as Record<string, unknown>;
+	if (
+		typeof auto.id !== "string" ||
+		!auto.id ||
+		auto.id.length > 100 ||
+		typeof auto.name !== "string" ||
+		auto.name.trim().length > 120 ||
+		(auto.alliance !== "red" && auto.alliance !== "blue") ||
+		(auto.score !== null && (typeof auto.score !== "number" || !Number.isFinite(auto.score) || auto.score < 0 || auto.score > 1000)) ||
+		typeof auto.path !== "object" ||
+		auto.path === null
+	) return null;
+	const path = auto.path as Record<string, unknown>;
+	if (!Array.isArray(path.points) || path.points.length < 2 || path.points.length > 50 || !Array.isArray(path.controls)) return null;
+	const isPoint = (point: unknown): point is AutoPoint =>
+		typeof point === "object" &&
+		point !== null &&
+		"x" in point &&
+		typeof point.x === "number" &&
+		Number.isFinite(point.x) &&
+		point.x >= 0 &&
+		point.x <= 1000 &&
+		"y" in point &&
+		typeof point.y === "number" &&
+		Number.isFinite(point.y) &&
+		point.y >= 0 &&
+		point.y <= 1000;
+	if (!path.points.every(isPoint) || !path.controls.every(isPoint) || path.controls.length !== path.points.length - 1) return null;
+	return {
+		id: auto.id,
+		name: auto.name.trim(),
+		alliance: auto.alliance,
+		score: auto.score,
+		path: { points: path.points, controls: path.controls },
+	};
+}
 
 const SOCIAL_PLATFORMS = ["website", "facebook", "x", "instagram", "youtube", "email", "other"] as const;
 type SocialPlatform = typeof SOCIAL_PLATFORMS[number];
@@ -77,6 +213,15 @@ function listFrom<T>(value: Record<string, unknown> | null, key: string): T[] {
 	if (!value) return [];
 	const list = value[key];
 	return Array.isArray(list) ? (list as T[]) : [];
+}
+
+function textValue(record: Record<string, unknown>, keys: string[]) {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === "string" && value.trim()) return value.trim();
+		if (typeof value === "number") return String(value);
+	}
+	return "";
 }
 
 function json(data: unknown, status = 200) {
@@ -166,11 +311,11 @@ async function getCustomEvents(db: D1Database | undefined, teamNumber: string, s
 async function getRobots(db: D1Database | undefined, teamNumber: string, season: string): Promise<RobotEntry[]> {
 	if (!db || typeof db.prepare !== "function") return [];
 	try {
-		const result = await db.prepare(`SELECT id, name, description, image_urls, start_month, end_month
+		const result = await db.prepare(`SELECT id, name, description, image_urls, start_month, end_month, scoring_capabilities, autos
 			FROM robot_entries WHERE team_number = ? AND season = ?
 			ORDER BY (end_month IS NULL) DESC, start_month DESC, created_at DESC`)
 			.bind(teamNumber, season)
-			.all<{ id: string; name: string; description: string; image_urls: string; start_month: string; end_month: string | null }>();
+			.all<{ id: string; name: string; description: string; image_urls: string; start_month: string; end_month: string | null; scoring_capabilities: string; autos: string }>();
 		return result.results.map((row) => ({
 			id: row.id,
 			name: row.name,
@@ -178,6 +323,8 @@ async function getRobots(db: D1Database | undefined, teamNumber: string, season:
 			imageUrls: parseRobotImages(row.image_urls),
 			startMonth: row.start_month,
 			endMonth: row.end_month,
+			scoringCapabilities: parseRobotScoringCapabilities(JSON.parse(row.scoring_capabilities)) || EMPTY_SCORING_CAPABILITIES,
+			autos: parseRobotAutos(row.autos),
 		}));
 	} catch (error) {
 		console.error(JSON.stringify({ message: "Could not read robot entries", error: error instanceof Error ? error.message : String(error) }));
@@ -232,8 +379,24 @@ function averageAllianceScore(matches: Record<string, unknown>[], teamNumber: st
 		const station = typeof assignment?.station === "string" ? assignment.station.toLowerCase() : "";
 		const alliance = station.startsWith("red") ? "Red" : station.startsWith("blue") ? "Blue" : null;
 		if (!alliance) continue;
-		const score = match[`score${alliance}${phase}`];
-		if (typeof score === "number" && Number.isFinite(score) && score >= 0) scores.push(score);
+		const readScore = (name: string) => {
+			const value = match[`score${alliance}${name}`];
+			return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+		};
+		const autoScore = readScore("Auto");
+		let score: number | null = autoScore;
+		if (phase === "Teleop") {
+			const driveControlledScore = readScore("DriveControlled") ?? readScore("Teleop");
+			const endgameScore = readScore("Endgame");
+			const finalScore = readScore("Final");
+			const foulScore = readScore("Foul") ?? 0;
+			score = driveControlledScore !== null && endgameScore !== null
+				? driveControlledScore + endgameScore
+				: finalScore !== null && autoScore !== null
+					? finalScore - autoScore - foulScore
+					: null;
+		}
+		if (score !== null && Number.isFinite(score) && score >= 0) scores.push(score);
 	}
 	return {
 		average: scores.length ? (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1) : null,
@@ -267,6 +430,50 @@ function averageFrcScore(matches: Record<string, unknown>[], teamKey: string, ph
 		average: scores.length ? (scores.reduce((sum, score) => sum + score, 0) / scores.length).toFixed(1) : null,
 		matchCount: scores.length,
 	};
+}
+
+function eventPerformance(
+	league: League,
+	teamNumber: string,
+	matches: Record<string, unknown>[],
+	events: Record<string, unknown>[],
+): EventPerformance[] {
+	const eventDetails = new Map<string, { name: string; date: string | null }>();
+	for (const event of events) {
+		const code = textValue(event, ["code", "key", "eventCode", "event_key"]);
+		if (!code) continue;
+		eventDetails.set(code, {
+			name: textValue(event, ["name", "eventName"]) || code,
+			date: textValue(event, ["dateStart", "start_date", "startDate"]),
+		});
+	}
+
+	const matchGroups = new Map<string, Record<string, unknown>[]>();
+	for (const match of matches) {
+		const code = textValue(match, ["eventCode", "event_key", "eventKey"]);
+		if (!code) continue;
+		const group = matchGroups.get(code) || [];
+		group.push(match);
+		matchGroups.set(code, group);
+	}
+
+	return [...matchGroups.entries()].map(([eventCode, eventMatches]) => {
+		const details = eventDetails.get(eventCode);
+		const auto = league === "FTC"
+			? averageAllianceScore(eventMatches, teamNumber, "Auto")
+			: averageFrcScore(eventMatches, `frc${teamNumber}`, "autoPoints");
+		const teleop = league === "FTC"
+			? averageAllianceScore(eventMatches, teamNumber, "Teleop")
+			: averageFrcScore(eventMatches, `frc${teamNumber}`, "teleopPoints");
+		return {
+			eventCode,
+			eventName: details?.name || eventCode,
+			eventDate: details?.date || null,
+			auto: auto.average,
+			teleop: teleop.average,
+		};
+	}).filter((event) => event.auto !== null || event.teleop !== null)
+		.sort((first, second) => (first.eventDate || "").localeCompare(second.eventDate || "") || first.eventName.localeCompare(second.eventName));
 }
 
 function validMonth(value: unknown): value is string {
@@ -373,6 +580,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	let eventsData: Record<string, unknown> | Record<string, unknown>[] | null = null;
 	let awardsData: Record<string, unknown> | Record<string, unknown>[] | null = null;
 	let matchesData: Record<string, unknown>[] = [];
+	let eventRecords: Record<string, unknown>[] = [];
 	let warnings: string[] = [];
 	let auto: { average: string | null; matchCount: number };
 	let teleop: { average: string | null; matchCount: number };
@@ -381,23 +589,44 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		const authorization = getFtcAuthorization(env);
 		if (!authorization) return json({ error: "FTC API credentials are not configured." }, 503);
 		const encodedTeamNumber = encodeURIComponent(teamNumber);
-		const [team, events, awards] = await Promise.all([
+		let [team, events, awards] = await Promise.all([
 			fetchFtc<Record<string, unknown>>(`${season}/teams?teamNumber=${encodedTeamNumber}`, authorization),
 			fetchFtc<Record<string, unknown>>(`${season}/events?teamNumber=${encodedTeamNumber}`, authorization),
 			fetchFtc<Record<string, unknown>>(`${season}/awards/${encodedTeamNumber}`, authorization),
 		]);
-		const eventRecords = listFrom<Record<string, unknown>>(events.data, "events");
+		let teamProfileWarning: string | null = null;
+		if (!team.data && team.status === 404 && season === "2026") {
+			const previousSeasonTeam = await fetchFtc<Record<string, unknown>>(`2025/teams?teamNumber=${encodedTeamNumber}`, authorization);
+			if (previousSeasonTeam.data) {
+				team = previousSeasonTeam;
+				teamProfileWarning = "FIRST has not returned this team's 2026–27 profile yet; showing its available 2025–26 team details. Event and match data remains limited to the selected season.";
+			}
+		}
+		eventRecords = listFrom<Record<string, unknown>>(events.data, "events");
 		const eventCodes = eventRecords
 			.map((event) => event.code)
-			.filter((code): code is string => typeof code === "string")
-			.slice(0, 20);
-		const matchResponses = await Promise.all(eventCodes.map((eventCode) =>
-			fetchFtc<Record<string, unknown>>(`${season}/matches/${encodeURIComponent(eventCode)}?teamNumber=${encodedTeamNumber}`, authorization),
+			.filter((code): code is string => typeof code === "string");
+		const matchRequests = eventCodes.flatMap((eventCode) =>
+			(["qual", "playoff"] as const).map((tournamentLevel) => ({ eventCode, tournamentLevel })),
+		);
+		const matchResponses = await Promise.all(matchRequests.map(({ eventCode, tournamentLevel }) =>
+			fetchFtc<Record<string, unknown>>(
+				`${season}/schedule/${encodeURIComponent(eventCode)}/${tournamentLevel}/hybrid`,
+				authorization,
+			),
 		));
-		matchesData = matchResponses.flatMap((response) => listFrom<Record<string, unknown>>(response.data, "matches"));
+		matchesData = matchResponses.flatMap((response, index) =>
+			listFrom<Record<string, unknown>>(response.data, "schedule")
+				.filter((match) => {
+					const teams = Array.isArray(match.teams) ? match.teams as Record<string, unknown>[] : [];
+					return teams.some((team) => String(team.teamNumber) === teamNumber);
+				})
+				.map((match) => ({ ...match, eventCode: matchRequests[index].eventCode })),
+		);
 		warnings = [team, events, awards, ...matchResponses]
 			.map((response) => response.warning)
 			.filter((warning): warning is string => Boolean(warning));
+		if (teamProfileWarning) warnings.push(teamProfileWarning);
 		if (!team.data && team.status === 404) return json({ error: `FTC team ${teamNumber} was not found for season ${season}.` }, 404);
 		const teamRecords = listFrom<Record<string, unknown>>(team.data, "teams");
 		teamProfile = teamRecords[0] || team.data;
@@ -422,6 +651,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		if (!team.data && team.status === 404) return json({ error: `FRC team ${teamNumber} was not found.` }, 404);
 		teamProfile = team.data;
 		eventsData = events.data;
+		eventRecords = events.data || [];
 		awardsData = awards.data;
 		matchesData = matches.data || [];
 		warnings = [team, events, awards, matches]
@@ -444,6 +674,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		selectedEvents: await getSelectedEvents(env.SCOUTING_DB, dbTeamNumber, season),
 		customEvents: await getCustomEvents(env.SCOUTING_DB, dbTeamNumber, season),
 		performance: { auto, teleop },
+		performanceByEvent: eventPerformance(league, teamNumber, matchesData, eventRecords),
 		robots: await getRobots(env.SCOUTING_DB, dbTeamNumber, season),
 		warnings,
 		meta: {
@@ -471,7 +702,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: `Enter a valid ${league} team number.` }, 400);
 	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
 
-	let body: { field?: unknown; value?: unknown; socials?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown };
+	let body: { field?: unknown; value?: unknown; socials?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown; scoringCapabilities?: unknown; auto?: unknown };
 	try {
 		body = (await request.json()) as { field?: unknown; value?: unknown };
 	} catch {
@@ -558,14 +789,82 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		return json({ customEvents: await getCustomEvents(env.SCOUTING_DB, dbTeamNumber, season) });
 	}
 
+	if (body.field === "robotAuto") {
+		if (league !== "FTC" || season !== "2026") return json({ error: "Autonomous paths are available for 2026–27 FTC only." }, 400);
+		if (typeof body.robotId !== "string" || !body.robotId || body.robotId.length > 100) return json({ error: "Choose a valid robot." }, 400);
+		if (typeof body.auto === "object" && body.auto !== null && "delete" in body.auto && body.auto.delete === true) {
+			const autoId = "id" in body.auto && typeof body.auto.id === "string" ? body.auto.id : "";
+			if (!autoId) return json({ error: "Choose a valid autonomous path to delete." }, 400);
+			try {
+				const existing = await env.SCOUTING_DB.prepare("SELECT name, autos FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
+					.bind(body.robotId, dbTeamNumber, season)
+					.first<{ name: string; autos: string }>();
+				if (!existing) return json({ error: "Robot entry not found." }, 404);
+				const previousAutos = parseRobotAutos(existing.autos);
+				const nextAutos = previousAutos.filter((auto) => auto.id !== autoId);
+				if (nextAutos.length === previousAutos.length) return json({ error: "Autonomous path not found." }, 404);
+				const identity = await getUserIdentity(env, session.sub);
+				await env.SCOUTING_DB.batch([
+					env.SCOUTING_DB.prepare("UPDATE robot_entries SET autos = ? WHERE id = ? AND team_number = ? AND season = ?")
+						.bind(JSON.stringify(nextAutos), body.robotId, dbTeamNumber, season),
+					auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Removed robot autonomous path",
+						`${league} ${teamNumber} / ${season}: ${existing.name || "Unnamed robot"} / ${autoId}`,
+						JSON.stringify(previousAutos.find((auto) => auto.id === autoId)), JSON.stringify(null)),
+				]);
+			} catch (error) {
+				return json({ error: `Could not remove autonomous path: ${error instanceof Error ? error.message : "database error"}` }, 503);
+			}
+			return json({ robots: await getRobots(env.SCOUTING_DB, dbTeamNumber, season) });
+		}
+
+		const auto = validateRobotAuto(body.auto);
+		if (!auto) return json({ error: "Add at least two valid path points and an optional valid name and score." }, 400);
+		try {
+			const existing = await env.SCOUTING_DB.prepare("SELECT name, autos FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
+				.bind(body.robotId, dbTeamNumber, season)
+				.first<{ name: string; autos: string }>();
+			if (!existing) return json({ error: "Robot entry not found." }, 404);
+			const previousAutos = parseRobotAutos(existing.autos);
+			let autoName = auto.name;
+			if (!autoName) {
+				const existingNames = new Set(previousAutos.map((item) => item.name));
+				let suffix = 1;
+				autoName = `${auto.alliance === "red" ? "Red" : "Blue"}${suffix}`;
+				while (existingNames.has(autoName)) {
+					suffix += 1;
+					autoName = `${auto.alliance === "red" ? "Red" : "Blue"}${suffix}`;
+				}
+			}
+			const savedAuto: RobotAuto = { ...auto, name: autoName };
+			const nextAutos = [...previousAutos.filter((item) => item.id !== savedAuto.id), savedAuto];
+			const identity = await getUserIdentity(env, session.sub);
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare("UPDATE robot_entries SET autos = ? WHERE id = ? AND team_number = ? AND season = ?")
+					.bind(JSON.stringify(nextAutos), body.robotId, dbTeamNumber, season),
+				auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Saved robot autonomous path",
+					`${league} ${teamNumber} / ${season}: ${existing.name || "Unnamed robot"} / ${savedAuto.name}`,
+					JSON.stringify(previousAutos.find((item) => item.id === savedAuto.id) || null), JSON.stringify(savedAuto)),
+			]);
+		} catch (error) {
+			return json({ error: `Could not save autonomous path: ${error instanceof Error ? error.message : "database error"}` }, 503);
+		}
+		return json({ robots: await getRobots(env.SCOUTING_DB, dbTeamNumber, season) });
+	}
+
 	if (body.field === "robot") {
+		const scoringCapabilities = league === "FTC" && season === "2026"
+			? body.scoringCapabilities === undefined
+				? EMPTY_SCORING_CAPABILITIES
+				: parseRobotScoringCapabilities(body.scoringCapabilities)
+			: EMPTY_SCORING_CAPABILITIES;
+		if (!scoringCapabilities) return json({ error: "Choose valid 2026–27 FTC robot scoring capabilities." }, 400);
 		if (body.robotId !== undefined && (typeof body.robotId !== "string" || !body.robotId || body.robotId.length > 100)) return json({ error: "Invalid robot entry." }, 400);
-		if (typeof body.robotName !== "string" || !body.robotName.trim() || body.robotName.trim().length > 120) return json({ error: "Enter a robot name (up to 120 characters)." }, 400);
+		if (typeof body.robotName !== "string" || body.robotName.trim().length > 120) return json({ error: "Robot name must be 120 characters or fewer." }, 400);
 		if (typeof body.description !== "string" || body.description.length > 2000) return json({ error: "Robot description must be 2,000 characters or fewer." }, 400);
-		if (!validMonth(body.startMonth)) return json({ error: "Choose a valid robot start month." }, 400);
+		if (typeof body.startMonth !== "string" || (body.startMonth !== "" && !validMonth(body.startMonth))) return json({ error: "Choose a valid robot start month." }, 400);
 		if (body.endMonth !== null && body.endMonth !== "" && !validMonth(body.endMonth)) return json({ error: "Choose a valid robot end month." }, 400);
 		const endMonth = typeof body.endMonth === "string" && body.endMonth ? body.endMonth : null;
-		if (endMonth && endMonth < body.startMonth) return json({ error: "Robot end month cannot be before its start month." }, 400);
+		if (endMonth && body.startMonth && endMonth < body.startMonth) return json({ error: "Robot end month cannot be before its start month." }, 400);
 		if (!Array.isArray(body.imageUrls) || body.imageUrls.length > 8 || !body.imageUrls.every((image) =>
 			typeof image === "object" &&
 			image !== null &&
@@ -582,9 +881,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		try {
 			const identity = await getUserIdentity(env, session.sub);
 			if (typeof body.robotId === "string") {
-				const existing = await env.SCOUTING_DB.prepare("SELECT name, description, image_urls, start_month, end_month FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
+				const existing = await env.SCOUTING_DB.prepare("SELECT name, description, image_urls, start_month, end_month, scoring_capabilities FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
 					.bind(body.robotId, dbTeamNumber, season)
-					.first<{ name: string; description: string; image_urls: string; start_month: string; end_month: string | null }>();
+					.first<{ name: string; description: string; image_urls: string; start_month: string; end_month: string | null; scoring_capabilities: string }>();
 				if (!existing) return json({ error: "Robot entry not found." }, 404);
 				const existingImages = parseRobotImages(existing.image_urls);
 				const existingById = new Map(existingImages.map((image) => [image.id, image]));
@@ -600,9 +899,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 				});
 				const result = await env.SCOUTING_DB.batch([
 					env.SCOUTING_DB.prepare(`UPDATE robot_entries
-					SET name = ?, description = ?, image_urls = ?, start_month = ?, end_month = ?
+					SET name = ?, description = ?, image_urls = ?, start_month = ?, end_month = ?, scoring_capabilities = ?
 					WHERE id = ? AND team_number = ? AND season = ?`)
-						.bind(body.robotName.trim(), body.description.trim(), JSON.stringify(images), body.startMonth, endMonth, body.robotId, dbTeamNumber, season),
+						.bind(body.robotName.trim(), body.description.trim(), JSON.stringify(images), body.startMonth, endMonth, JSON.stringify(scoringCapabilities), body.robotId, dbTeamNumber, season),
 					auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Updated robot entry",
 						`${league} ${teamNumber} / ${season}: ${body.robotName.trim()} (${body.robotId})`,
 						JSON.stringify({
@@ -611,6 +910,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 							images: parseRobotImages(existing.image_urls).map(({ url }) => url),
 							startMonth: existing.start_month,
 							endMonth: existing.end_month,
+							scoringCapabilities: parseRobotScoringCapabilities(JSON.parse(existing.scoring_capabilities)) || EMPTY_SCORING_CAPABILITIES,
 						}, null, 2),
 						JSON.stringify({
 							name: body.robotName.trim(),
@@ -618,18 +918,19 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 							images: images.map(({ url }) => url),
 							startMonth: body.startMonth,
 							endMonth,
+							scoringCapabilities,
 						}, null, 2)),
 				]);
 				if (!result[0].meta.changes) return json({ error: "Robot entry not found." }, 404);
 			} else {
 				await env.SCOUTING_DB.batch([
-					env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-						.bind(crypto.randomUUID(), dbTeamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify([]), body.startMonth, endMonth),
+					env.SCOUTING_DB.prepare(`INSERT INTO robot_entries (id, team_number, season, name, description, image_urls, start_month, end_month, scoring_capabilities)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+						.bind(crypto.randomUUID(), dbTeamNumber, season, body.robotName.trim(), body.description.trim(), JSON.stringify([]), body.startMonth, endMonth, JSON.stringify(scoringCapabilities)),
 					auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Created robot entry",
 						`${league} ${teamNumber} / ${season}: ${body.robotName.trim()}`,
 						null,
-						JSON.stringify({ name: body.robotName.trim(), description: body.description.trim(), images: [], startMonth: body.startMonth, endMonth }, null, 2)),
+						JSON.stringify({ name: body.robotName.trim(), description: body.description.trim(), images: [], startMonth: body.startMonth, endMonth, scoringCapabilities }, null, 2)),
 				]);
 			}
 		} catch (error) {

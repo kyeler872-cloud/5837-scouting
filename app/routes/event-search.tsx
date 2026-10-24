@@ -121,8 +121,9 @@ export default function EventSearchPage() {
 					<a className="brand" href="/home"><span>Scout 5837</span></a>
 					<div className="topbar-tabs" aria-label="Search mode">
 						<a href="/home">Team search</a>
+						<a href="/compare">Compare</a>
 						<a href="/events" aria-current="page">Event search</a>
-						<a href="/logs">Logs</a>
+						<a href="/settings">Settings</a>
 					</div>
 					<UserButton />
 				</nav>

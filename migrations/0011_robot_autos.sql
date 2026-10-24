@@ -1,0 +1,2 @@
+ALTER TABLE robot_entries
+	ADD COLUMN autos TEXT NOT NULL DEFAULT '[]';
