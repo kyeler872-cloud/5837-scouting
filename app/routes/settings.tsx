@@ -232,7 +232,7 @@ export default function SettingsPage() {
 							<div>
 								<p className="section-kicker">FTC 2026–27</p>
 								<h2 id="compatibility-title">Team compatibility influences</h2>
-								<p>Set how strongly each scoring capability should affect future FTC matching for teams 7247 and 5445. FRC team 5837 is outside this FTC-only capability set. 0% ignores a field; 100% gives it the strongest influence.</p>
+								<p>Set how strongly each scoring capability should affect future FTC matching. FRC will be added later. Meow meow meow</p>
 							</div>
 						</header>
 						{isLoadingWeights ? <p className="logs-status" aria-busy="true">Loading shared influences...</p> : <>

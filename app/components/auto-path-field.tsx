@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import fieldImage from "../routes/Biobuzzfield.png";
 
 export type AutoPoint = { x: number; y: number };
@@ -12,6 +12,13 @@ export type RobotAuto = {
 };
 
 const VIEW_SIZE = 1000;
+type PointGesture = {
+	index: number;
+	pointerId: number;
+	start: AutoPoint;
+	last: AutoPoint;
+	moved: boolean;
+};
 
 function toSvgPath(path: AutoPath) {
 	return path.points.slice(1).reduce((svgPath, point, index) => {
@@ -29,12 +36,19 @@ export function AutoPathField({ path, color = "#ffffff", editable = false, onCha
 }) {
 	const [placingPoints, setPlacingPoints] = useState(false);
 	const [draggingControl, setDraggingControl] = useState<number | null>(null);
+	const pointGesture = useRef<PointGesture | null>(null);
 
 	function pointFromEvent(event: React.PointerEvent<SVGSVGElement>): AutoPoint {
-		const bounds = event.currentTarget.getBoundingClientRect();
+		const svg = event.currentTarget;
+		const matrix = svg.getScreenCTM();
+		if (!matrix) return { x: 0, y: 0 };
+		const pointer = svg.createSVGPoint();
+		pointer.x = event.clientX;
+		pointer.y = event.clientY;
+		const point = pointer.matrixTransform(matrix.inverse());
 		return {
-			x: Math.max(0, Math.min(VIEW_SIZE, ((event.clientX - bounds.left) / bounds.width) * VIEW_SIZE)),
-			y: Math.max(0, Math.min(VIEW_SIZE, ((event.clientY - bounds.top) / bounds.height) * VIEW_SIZE)),
+			x: Math.max(0, Math.min(VIEW_SIZE, point.x)),
+			y: Math.max(0, Math.min(VIEW_SIZE, point.y)),
 		};
 	}
 
@@ -49,9 +63,68 @@ export function AutoPathField({ path, color = "#ffffff", editable = false, onCha
 	}
 
 	function moveControl(event: React.PointerEvent<SVGSVGElement>) {
-		if (draggingControl === null || !onChange) return;
 		const point = pointFromEvent(event);
-		onChange({ ...path, controls: path.controls.map((control, index) => index === draggingControl ? point : control) });
+		const gesture = pointGesture.current;
+		if (gesture?.pointerId === event.pointerId && onChange) {
+			const bounds = event.currentTarget.getBoundingClientRect();
+			const threshold = bounds.width > 0 ? VIEW_SIZE * 5 / bounds.width : 12;
+			const dx = point.x - gesture.last.x;
+			const dy = point.y - gesture.last.y;
+			if (Math.hypot(point.x - gesture.start.x, point.y - gesture.start.y) > threshold) gesture.moved = true;
+			const controls = path.controls.map((control, index) =>
+				index === gesture.index - 1 || index === gesture.index
+					? { x: control.x + dx, y: control.y + dy }
+					: control,
+			);
+			onChange({
+				...path,
+				points: path.points.map((item, index) => index === gesture.index ? point : item),
+				controls,
+			});
+			gesture.last = point;
+			return;
+		}
+		if (draggingControl !== null && onChange) {
+			onChange({ ...path, controls: path.controls.map((control, index) => index === draggingControl ? point : control) });
+		}
+	}
+
+	function startPointGesture(event: React.PointerEvent<SVGCircleElement>, index: number) {
+		if (!editable || !onChange) return;
+		event.stopPropagation();
+		const point = path.points[index];
+		pointGesture.current = { index, pointerId: event.pointerId, start: point, last: point, moved: false };
+		event.currentTarget.ownerSVGElement?.setPointerCapture(event.pointerId);
+	}
+
+	function finishPointer(event: React.PointerEvent<SVGSVGElement>) {
+		setDraggingControl(null);
+		const gesture = pointGesture.current;
+		if (!gesture || gesture.pointerId !== event.pointerId) return;
+		if (!gesture.moved && onChange) {
+			const points = path.points.filter((_, index) => index !== gesture.index);
+			let controls: AutoPoint[];
+			if (gesture.index === 0) {
+				controls = path.controls.slice(1);
+			} else if (gesture.index === path.points.length - 1) {
+				controls = path.controls.slice(0, -1);
+			} else {
+				const previous = path.points[gesture.index - 1];
+				const next = path.points[gesture.index + 1];
+				controls = [
+					...path.controls.slice(0, gesture.index - 1),
+					{ x: (previous.x + next.x) / 2, y: (previous.y + next.y) / 2 },
+					...path.controls.slice(gesture.index + 1),
+				];
+			}
+			onChange({ points, controls });
+		}
+		pointGesture.current = null;
+	}
+
+	function cancelPointer(event: React.PointerEvent<SVGSVGElement>) {
+		setDraggingControl(null);
+		if (pointGesture.current?.pointerId === event.pointerId) pointGesture.current = null;
 	}
 
 	return (
@@ -70,18 +143,18 @@ export function AutoPathField({ path, color = "#ffffff", editable = false, onCha
 				aria-label="2026–27 FTC field with autonomous robot path"
 				onPointerDown={addPoint}
 				onPointerMove={moveControl}
-				onPointerUp={() => setDraggingControl(null)}
-				onPointerCancel={() => setDraggingControl(null)}
+				onPointerUp={finishPointer}
+				onPointerCancel={cancelPointer}
 			>
-				<image href={fieldImage} x="0" y="0" width={VIEW_SIZE} height={VIEW_SIZE} preserveAspectRatio="none" />
-				<path d={toSvgPath(path)} fill="none" stroke="#071426" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round" />
-				<path d={toSvgPath(path)} fill="none" stroke={color} strokeWidth="12" strokeLinecap="round" strokeLinejoin="round" />
+				<image className="auto-path-artwork" href={fieldImage} x="0" y="0" width={VIEW_SIZE} height={VIEW_SIZE} preserveAspectRatio="none" />
+				<path className="auto-path-artwork" d={toSvgPath(path)} fill="none" stroke="#071426" strokeWidth="12" strokeLinecap="round" strokeLinejoin="round" />
+				<path className="auto-path-artwork" d={toSvgPath(path)} fill="none" stroke={color} strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
 				{path.controls.map((control, index) => <g key={`control-${index}`}>
-					{editable && <line x1={path.points[index].x} y1={path.points[index].y} x2={control.x} y2={control.y} stroke={color} strokeWidth="4" strokeDasharray="10 10" opacity="0.8" />}
+					{editable && <line className="auto-path-artwork" x1={path.points[index].x} y1={path.points[index].y} x2={control.x} y2={control.y} stroke={color} strokeWidth="3" strokeDasharray="10 10" opacity="0.8" />}
 					<circle
 						cx={control.x}
 						cy={control.y}
-						r={editable ? 24 : 0}
+						r={editable ? 17 : 0}
 						fill={editable ? "#071426" : "transparent"}
 						stroke={editable ? color : "none"}
 						strokeWidth="8"
@@ -94,8 +167,17 @@ export function AutoPathField({ path, color = "#ffffff", editable = false, onCha
 					/>
 				</g>)}
 				{path.points.map((point, index) => <g key={`point-${index}`}>
-					<circle cx={point.x} cy={point.y} r="24" fill={index === 0 ? color : "#071426"} stroke={color} strokeWidth="8" />
-					<text x={point.x} y={point.y + 7} textAnchor="middle" fill={index === 0 ? "#071426" : "#fff"} fontSize="22" fontWeight="800">{index + 1}</text>
+					<circle
+						cx={point.x}
+						cy={point.y}
+						r="18"
+						fill={index === 0 ? color : "#071426"}
+						stroke={color}
+						strokeWidth="5"
+						className={editable ? "auto-path-waypoint" : "auto-path-artwork"}
+						onPointerDown={editable ? (event) => startPointGesture(event, index) : undefined}
+					/>
+					<text className="auto-path-artwork" x={point.x} y={point.y + 6} textAnchor="middle" fill={index === 0 ? "#071426" : "#fff"} fontSize="17" fontWeight="800">{index + 1}</text>
 				</g>)}
 			</svg>
 			{editable && <p className="auto-path-help">Place the starting point first, then click the field for each next location. Drag a midpoint handle to bend its segment.</p>}
@@ -110,13 +192,13 @@ export function AutoPathComparisonField({ paths }: {
 	return (
 		<div className="auto-path-field">
 			<svg className="auto-path-svg" viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} role="img" aria-label="Selected autonomous paths overlaid on the 2026–27 FTC field">
-				<image href={fieldImage} x="0" y="0" width={VIEW_SIZE} height={VIEW_SIZE} preserveAspectRatio="none" />
+				<image className="auto-path-artwork" href={fieldImage} x="0" y="0" width={VIEW_SIZE} height={VIEW_SIZE} preserveAspectRatio="none" />
 				{paths.map((item) => <g key={item.key}>
-					<path d={toSvgPath(item.path)} fill="none" stroke="#071426" strokeWidth="25" strokeLinecap="round" strokeLinejoin="round" />
-					<path d={toSvgPath(item.path)} fill="none" stroke={item.color} strokeWidth="13" strokeLinecap="round" strokeLinejoin="round">
+					<path className="auto-path-artwork" d={toSvgPath(item.path)} fill="none" stroke="#071426" strokeWidth="15" strokeLinecap="round" strokeLinejoin="round" />
+					<path className="auto-path-artwork" d={toSvgPath(item.path)} fill="none" stroke={item.color} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round">
 						<title>{item.label}</title>
 					</path>
-					{item.path.points.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 ? 18 : 12} fill={item.color} stroke="#071426" strokeWidth="5">
+					{item.path.points.map((point, index) => <circle className="auto-path-artwork" key={index} cx={point.x} cy={point.y} r={index === 0 ? 14 : 9} fill={item.color} stroke="#071426" strokeWidth="4">
 						<title>{`${item.label} · point ${index + 1}`}</title>
 					</circle>)}
 				</g>)}

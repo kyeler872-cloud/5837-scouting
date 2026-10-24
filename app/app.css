@@ -54,6 +54,8 @@ body {
 .search-button:disabled { cursor: wait; opacity: 0.6; }
 .lookup-error, .lookup-warning { color: #ffb4ab; font-size: 0.85rem; }
 .team-results { max-width: 76rem; margin: 0 auto; padding: 0 1.25rem 5rem; }
+.team-results { scroll-margin-top: 1rem; }
+.mobile-back-to-top { display: none; }
 .team-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 2rem; border-top: 1px solid var(--line); padding-top: 2rem; }
 .team-heading h2 { margin: 0; font-size: clamp(2rem, 5vw, 4rem); letter-spacing: -0.05em; line-height: 1; }
 .team-heading > div > p:last-child { color: var(--muted); }
@@ -316,12 +318,17 @@ body {
 .robot-autos > header .robot-editor-kicker { display: block; margin-bottom: 0.25rem; }
 .robot-auto-list { display: grid; gap: 0.75rem; }
 .robot-auto-card { min-width: 0; border: 1px solid var(--line); background: #07142666; padding: 0.75rem; }
+.robot-auto-heading { cursor: pointer; list-style: none; }
+.robot-auto-heading::-webkit-details-marker { display: none; }
+.robot-auto-heading::after { content: "＋"; color: var(--blue-300); font-size: 1.1rem; }
+.robot-auto-card[open] > .robot-auto-heading::after { content: "−"; }
 .robot-auto-heading h6 { margin: 0; font-size: 0.9rem; }
 .robot-auto-heading p { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.72rem; text-transform: capitalize; }
-.robot-auto-heading > div:last-child { display: flex; gap: 0.4rem; }
-.robot-auto-heading button, .auto-path-tools button { border: 1px solid var(--line); background: var(--navy-900); color: var(--blue-300); cursor: pointer; font: inherit; font-size: 0.7rem; padding: 0.4rem 0.6rem; }
-.robot-auto-heading button:hover, .auto-path-tools button:hover, .auto-path-tools button.active { border-color: var(--blue-600); background: var(--navy-800); color: var(--white); }
-.robot-auto-heading button:disabled { cursor: wait; opacity: 0.6; }
+.robot-auto-content { display: grid; gap: 0.6rem; margin-top: 0.75rem; }
+.robot-auto-actions { display: flex; justify-content: flex-end; gap: 0.4rem; }
+.robot-auto-actions button, .auto-path-tools button { border: 1px solid var(--line); background: var(--navy-900); color: var(--blue-300); cursor: pointer; font: inherit; font-size: 0.7rem; padding: 0.4rem 0.6rem; }
+.robot-auto-actions button:hover, .auto-path-tools button:hover, .auto-path-tools button.active { border-color: var(--blue-600); background: var(--navy-800); color: var(--white); }
+.robot-auto-actions button:disabled { cursor: wait; opacity: 0.6; }
 .robot-auto-editor { display: grid; gap: 0.75rem; border: 1px solid var(--line); background: #07142666; padding: 0.85rem; }
 .robot-auto-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.65rem; }
 .robot-auto-fields label { display: grid; gap: 0.35rem; color: var(--muted); font-size: 0.72rem; font-weight: 750; }
@@ -329,7 +336,9 @@ body {
 .robot-auto-fields input, .robot-auto-fields select, .auto-compare-selectors select { box-sizing: border-box; width: 100%; min-height: 2.6rem; border: 1px solid var(--line); background: var(--navy-900); color: var(--white); font: inherit; padding: 0.55rem; }
 .auto-path-field { overflow: hidden; border: 1px solid var(--line); background: #071426; }
 .auto-path-svg { display: block; width: 100%; max-height: 42rem; aspect-ratio: 1; touch-action: none; }
+.auto-path-artwork { pointer-events: none; }
 .auto-path-field.editable .auto-path-svg { cursor: crosshair; }
+.auto-path-waypoint { cursor: move; }
 .auto-path-control { cursor: grab; }
 .auto-path-control:active { cursor: grabbing; }
 .auto-path-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; border-bottom: 1px solid var(--line); padding: 0.6rem; }
@@ -434,6 +443,8 @@ body {
 .event-note-actions > span { color: var(--muted); font-size: 0.72rem; }
 
 @media (max-width: 560px) {
+	.mobile-back-to-top { position: fixed; z-index: 20; right: 1rem; bottom: 1rem; display: inline-flex; align-items: center; gap: 0.45rem; border: 1px solid #9bd4ef88; border-radius: 999px; background: #0b1f3aee; box-shadow: 0 0.5rem 1.5rem #0008; color: var(--white); cursor: pointer; font: inherit; font-size: 0.85rem; font-weight: 800; padding: 0.65rem 0.9rem; }
+	.mobile-back-to-top span { font-size: 0.68rem; }
 	.topbar { padding: 1rem 1.25rem; }
 	.button-quiet { display: none; }
 	.terms-link { margin-left: 0; margin-right: 0.5rem; }

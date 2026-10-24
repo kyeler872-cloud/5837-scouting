@@ -160,6 +160,7 @@ export default function Home() {
     const [league, setLeague] = useState<"FTC" | "FRC">("FTC");
     const [season, setSeason] = useState("2026");
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
+    const showGraphs = !result || result.league !== "FRC" || records(result.events).length > 1;
     const [socialLinks, setSocialLinks] = useState<SocialLinks>({ website: "", facebook: "", x: "", instagram: "", youtube: "", email: "", other: "" });
     const [isEditingSocials, setIsEditingSocials] = useState(false);
     const [error, setError] = useState("");
@@ -167,6 +168,8 @@ export default function Home() {
     const [isSavingSocials, setIsSavingSocials] = useState(false);
     const [activeSection, setActiveSection] = useState("auto");
     const autoSearchStarted = useRef(false);
+    const teamResultsRef = useRef<HTMLElement | null>(null);
+    const scrollToResultAfterSearch = useRef(false);
 
     async function lookupTeam(number: string, targetSeason: string, targetLeague: "FTC" | "FRC") {
         const normalizedTeamNumber = number.trim();
@@ -184,6 +187,7 @@ export default function Home() {
         setError("");
         setResult(null);
         setActiveSection("auto");
+        scrollToResultAfterSearch.current = true;
         setIsSearching(true);
         try {
             const token = await getToken();
@@ -197,6 +201,7 @@ export default function Home() {
             setSocialLinks(teamResult.socialLinks);
             setIsEditingSocials(false);
         } catch (lookupError) {
+            scrollToResultAfterSearch.current = false;
             setError(lookupError instanceof Error ? lookupError.message : "Team lookup failed.");
         } finally {
             setIsSearching(false);
@@ -205,18 +210,23 @@ export default function Home() {
 
     useEffect(() => {
         if (!result) return;
+        if (scrollToResultAfterSearch.current) {
+            scrollToResultAfterSearch.current = false;
+            teamResultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
         const observer = new IntersectionObserver((entries) => {
             const visible = entries
                 .filter((entry) => entry.isIntersecting)
                 .sort((first, second) => first.boundingClientRect.top - second.boundingClientRect.top)[0];
             if (visible) setActiveSection(visible.target.id);
         }, { rootMargin: "-15% 0px -70% 0px", threshold: 0 });
-        const sections = ["auto", "teleop", "graphs", "events", "robot"]
+        const sectionIds = ["auto", "teleop", ...(showGraphs ? ["graphs"] : []), "events", "robot"];
+        const sections = sectionIds
             .map((id) => document.getElementById(id))
             .filter((section): section is HTMLElement => section !== null);
         sections.forEach((section) => observer.observe(section));
         return () => observer.disconnect();
-    }, [result]);
+    }, [result, showGraphs]);
 
     useEffect(() => {
         if (autoSearchStarted.current) return;
@@ -387,7 +397,7 @@ export default function Home() {
                 </section>
                 {/* only shows search results if team data was found */}
                 {result && (
-                    <section className="team-results" aria-live="polite">
+                    <section className="team-results" aria-live="polite" ref={teamResultsRef}>
                         {/* team heading with name, location, logo */}
                         <header className="team-heading">
                             <div>
@@ -479,7 +489,7 @@ export default function Home() {
                             <aside className="section-sidebar" aria-label="Team page sections">
                                 <p>On this page</p>
                                 <nav>
-                                    {(["auto", "teleop", "graphs", "events", "robot"] as const).map((id) => (
+                                    {(["auto", "teleop", ...(showGraphs ? ["graphs" as const] : []), "events", "robot"] as const).map((id) => (
                                         <button
                                             type="button"
                                             key={id}
@@ -515,14 +525,14 @@ export default function Home() {
                                     note={result.overrides.teleopNotes}
                                     onSave={saveOverride}
                                 />
-                                <section className="team-section score-trend-section" id="graphs">
+                                {showGraphs && <section className="team-section score-trend-section" id="graphs">
                                     <div className="score-trend-heading">
                                         <SectionHeading eyebrow="Season performance" title="Team score graphs by event" />
                                         <a className="compare-page-link" href={`/compare?${new URLSearchParams({ team: result.teamNumber, league: result.league, season: result.season })}`}>Compare with a different team <span aria-hidden="true">→</span></a>
                                     </div>
                                     <p className="section-description">Compare Auto and TeleOp alliance averages across the season.</p>
                                     <ScoreTrendChart league={result.league} teams={[{ teamNumber: result.teamNumber, events: result.performanceByEvent }]} />
-                                </section>
+                                </section>}
                                 <section className="team-section" id="events">
                                     <SectionHeading eyebrow="Competition record" title="Events" />
                                     <details className="events-awards" open>
@@ -543,6 +553,9 @@ export default function Home() {
                         {result.warnings.length > 0 && <p className="lookup-warning">Some {result.league} data was unavailable: {result.warnings.join("; ")}</p>}
                     </section>
                 )}
+                {result && <button className="mobile-back-to-top" type="button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+                    ↑ <span>Back to top</span>
+                </button>}
             </main>
         </Protected>
     );
@@ -953,13 +966,18 @@ function RobotAutos({ robot, onSaveAuto }: {
                 {!draft && <button type="button" className="add-robot-button" onClick={startNewAuto}>＋ Add auto</button>}
             </header>
             {robot.autos.length > 0 && <div className="robot-auto-list">{robot.autos.map((auto) => (
-                <article className="robot-auto-card" key={auto.id}>
-                    <div className="robot-auto-heading">
+                <details className="robot-auto-card" key={auto.id}>
+                    <summary className="robot-auto-heading">
                         <div><h6>{auto.name}</h6><p>{auto.alliance === "red" ? "Red" : "Blue"} alliance{auto.score !== null ? ` · Typical score: ${auto.score}` : ""}</p></div>
-                        <div><button type="button" onClick={() => editAuto(auto)} disabled={saving}>Edit</button><button type="button" onClick={() => void removeAuto(auto)} disabled={saving}>Remove</button></div>
+                    </summary>
+                    <div className="robot-auto-content">
+                        <div className="robot-auto-actions">
+                            <button type="button" onClick={() => editAuto(auto)} disabled={saving}>Edit</button>
+                            <button type="button" onClick={() => void removeAuto(auto)} disabled={saving}>Remove</button>
+                        </div>
+                        <AutoPathField path={auto.path} color={auto.alliance === "red" ? "#ff564f" : "#4b83ff"} />
                     </div>
-                    <AutoPathField path={auto.path} color={auto.alliance === "red" ? "#ff564f" : "#4b83ff"} />
-                </article>
+                </details>
             ))}</div>}
             {draft && <form className="robot-auto-editor" onSubmit={(event) => void submitAuto(event)}>
                 <div className="robot-auto-fields">
