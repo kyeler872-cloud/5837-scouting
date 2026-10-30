@@ -542,9 +542,6 @@ export default function Home() {
                         {result.warnings.length > 0 && <p className="lookup-warning">Some {result.league} data was unavailable: {result.warnings.join("; ")}</p>}
                     </section>
                 )}
-                {result && <button className="mobile-back-to-top" type="button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
-                    ↑ <span>Back to top</span>
-                </button>}
             </main>
             )}
         </Protected>

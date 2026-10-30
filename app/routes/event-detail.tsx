@@ -85,8 +85,12 @@ export default function EventDetailPage() {
 	const [matchDrafts, setMatchDrafts] = useState<Record<string, Partial<Record<MatchPhase, string>>>>({});
 	const [editingMatchKey, setEditingMatchKey] = useState<string | null>(null);
 	const [error, setError] = useState("");
+	const [teamHighlightError, setTeamHighlightError] = useState("");
+	const [highlightedTeamNumbers, setHighlightedTeamNumbers] = useState<string[]>([]);
+	const [showAllMatches, setShowAllMatches] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
+	const [isMobile, setIsMobile] = useState(false);
 	const query = new URLSearchParams(location.search);
 	const selectedMatchKey = query.get("match") || "";
 	const lastScrolledMatchKey = useRef("");
@@ -94,11 +98,22 @@ export default function EventDetailPage() {
 	const returnTo = requestedReturn.startsWith("/home") || requestedReturn.startsWith("/events") ? requestedReturn : "/events";
 
 	useEffect(() => {
+		const mediaQuery = window.matchMedia("(max-width: 560px)");
+		const updateLayout = () => setIsMobile(mediaQuery.matches);
+		updateLayout();
+		mediaQuery.addEventListener("change", updateLayout);
+		return () => mediaQuery.removeEventListener("change", updateLayout);
+	}, []);
+
+	useEffect(() => {
 		let cancelled = false;
 		async function load() {
 			setLoading(true);
 			setEventData(null);
 			setError("");
+			setTeamHighlightError("");
+			setHighlightedTeamNumbers([]);
+			setShowAllMatches(false);
 			try {
 				const token = await getToken();
 				const response = await fetch(`/api/events/${league}/${encodeURIComponent(season)}/${encodeURIComponent(eventCode)}`, {
@@ -114,6 +129,34 @@ export default function EventDetailPage() {
 						match.matchKey,
 						Object.fromEntries(matchPhases.map((phase) => [phase, match.notes[phase]?.value || ""])),
 					])));
+				}
+				try {
+					const settingsResponse = await fetch("/api/settings?scope=personal", {
+						headers: token ? { Authorization: ["Bearer", token].join(" ") } : undefined,
+					});
+					const settingsData = await readResponse<{
+						personal?: { ftcTeamNumber?: number; teamPreset?: string };
+						error?: string;
+					}>(settingsResponse);
+					if (!settingsResponse.ok || !settingsData.personal) {
+						throw new Error(settingsData.error || "Could not load your account team settings.");
+					}
+					if (!cancelled) {
+						const personal = settingsData.personal;
+						setHighlightedTeamNumbers(league === "FRC"
+							? ["5837"]
+							: personal.teamPreset === "SLB"
+								? ["7247", "5445"]
+								: typeof personal.ftcTeamNumber === "number"
+									? [String(personal.ftcTeamNumber)]
+									: []);
+					}
+				} catch (settingsError) {
+					if (!cancelled) {
+						setTeamHighlightError(settingsError instanceof Error
+							? `Your team matches could not be highlighted: ${settingsError.message}`
+							: "Your team matches could not be highlighted.");
+					}
 				}
 			} catch (loadError) {
 				if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load event.");
@@ -212,6 +255,10 @@ export default function EventDetailPage() {
 		}
 	}
 
+	const displayedMatches = (eventData?.matches || []).filter((match) =>
+		showAllMatches || match.matchKey === selectedMatchKey || match.teams.some((number) => highlightedTeamNumbers.includes(number))
+	);
+
 	return (
 		<Protected>
 			<main className="home-shell">
@@ -220,6 +267,7 @@ export default function EventDetailPage() {
 					<a className="event-back-link" href={returnTo}>← Back</a>
 					{loading && <p className="event-page-status" aria-busy="true">Loading event...</p>}
 					{error && <p className="lookup-error" role="alert">{error}</p>}
+					{teamHighlightError && <p className="lookup-warning" role="status">{teamHighlightError}</p>}
 					{eventData && <>
 						<header className="event-detail-heading">
 							<p className="section-kicker">{league} / {season} season {eventData.event.custom ? "· Custom event" : ""}</p>
@@ -234,24 +282,30 @@ export default function EventDetailPage() {
 						{eventData.warning && <p className="lookup-warning" role="status">{eventData.warning}</p>}
 						<div className="event-detail-grid">
 							<section className="event-roster" aria-labelledby="event-roster-heading">
-								<p className="section-kicker">Participating teams</p>
-								<h2 id="event-roster-heading">Teams <span>{eventData.teams.length}</span></h2>
-								{eventData.event.custom && <form className="manual-team-form" onSubmit={(event) => void addTeam(event)}>
-									<input required inputMode="numeric" pattern="[0-9]*" maxLength={6} aria-label="Team number" placeholder={`${league} team number`} value={teamNumber} onChange={(event) => setTeamNumber(event.target.value)} />
-									<input aria-label="Team name (optional)" maxLength={200} placeholder="Team name (optional)" value={teamName} onChange={(event) => setTeamName(event.target.value)} />
-									<button type="submit" disabled={saving}>Import team</button>
-								</form>}
-								{eventData.teams.length ? <ul className="event-team-list">{eventData.teams.map((team) => <li key={team.number}>
-									<span className="event-team-name"><strong>{league} {team.number}</strong>{team.name && <span>{team.name}</span>}{team.manual && <small>Manual</small>}</span>
-									<span className="event-team-actions">
-										<a className="event-team-search" href={searchTeamUrl(league, season, team.number)} target="_blank" rel="noreferrer" aria-label={`Search ${league} team ${team.number}`} title={`Search ${league} team ${team.number}`}><SearchIcon /></a>
-										{team.manual && eventData.event.custom && <button className="event-team-remove" type="button" onClick={() => void removeTeam(team.number)} aria-label={`Remove team ${team.number}`}>×</button>}
-									</span>
-								</li>)}</ul> : <p className="empty-event-results">No teams are listed for this event.</p>}
+								<details className="event-mobile-disclosure" key={isMobile ? "mobile" : "desktop"} open={!isMobile}>
+									<summary>
+										<p className="section-kicker">Participating teams</p>
+										<h2 id="event-roster-heading">Teams <span>{eventData.teams.length}</span></h2>
+									</summary>
+									<div className="event-roster-content">
+										{eventData.event.custom && <form className="manual-team-form" onSubmit={(event) => void addTeam(event)}>
+											<input required inputMode="numeric" pattern="[0-9]*" maxLength={6} aria-label="Team number" placeholder={`${league} team number`} value={teamNumber} onChange={(event) => setTeamNumber(event.target.value)} />
+											<input aria-label="Team name (optional)" maxLength={200} placeholder="Team name (optional)" value={teamName} onChange={(event) => setTeamName(event.target.value)} />
+											<button type="submit" disabled={saving}>Import team</button>
+										</form>}
+										{eventData.teams.length ? <ul className="event-team-list">{eventData.teams.map((team) => <li key={team.number}>
+											<span className="event-team-name"><strong>{league} {team.number}</strong>{team.name && <span>{team.name}</span>}{team.manual && <small>Manual</small>}</span>
+											<span className="event-team-actions">
+												<a className="event-team-search" href={searchTeamUrl(league, season, team.number)} target="_blank" rel="noreferrer" aria-label={`Search ${league} team ${team.number}`} title={`Search ${league} team ${team.number}`}><SearchIcon /></a>
+												{team.manual && eventData.event.custom && <button className="event-team-remove" type="button" onClick={() => void removeTeam(team.number)} aria-label={`Remove team ${team.number}`}>×</button>}
+											</span>
+										</li>)}</ul> : <p className="empty-event-results">No teams are listed for this event.</p>}
+									</div>
+								</details>
 							</section>
 							<section className="event-notes" aria-labelledby="event-notes-heading">
 								<p className="section-kicker">Shared event notes</p>
-								<h2 id="event-notes-heading">Scout notes</h2>
+								<h2 id="event-notes-heading">General event notes</h2>
 								<div className="event-note-tabs" role="tablist" aria-label="Note category">
 									{categories.map((item) => <button key={item} type="button" role="tab" aria-selected={category === item} className={category === item ? "active" : ""} onClick={() => setCategory(item)}>{item}</button>)}
 								</div>
@@ -260,15 +314,22 @@ export default function EventDetailPage() {
 							</section>
 						</div>
 						<section className="event-qualifications" aria-labelledby="event-qualifications-heading">
-							<header className="event-qualifications-heading">
-								<div><p className="section-kicker">Match scouting</p><h2 id="event-qualifications-heading">Qualification matches</h2></div>
-								<p>Save Auto, TeleOp, and Endgame notes by match.</p>
-							</header>
-							{eventData.matches.length ? <div className="event-qualification-list">{eventData.matches.map((match, index) => {
+							<details className="event-mobile-disclosure" key={isMobile ? "mobile" : "desktop"} open={!isMobile || Boolean(selectedMatchKey)}>
+								<summary>
+									<header className="event-qualifications-heading">
+										<div><p className="section-kicker">Match scouting</p><h2 id="event-qualifications-heading">Qualification matches</h2></div>
+										<p>Save Auto, TeleOp, and Endgame notes by match.</p>
+									</header>
+								</summary>
+								<button className="event-match-filter" type="button" aria-pressed={showAllMatches} onClick={() => setShowAllMatches((showingAll) => !showingAll)}>
+									{showAllMatches ? "Show only my matches" : "Show all matches"}
+								</button>
+								{displayedMatches.length ? <div className="event-qualification-list">{displayedMatches.map((match) => {
 								const hasNotes = matchPhases.some((phase) => Boolean(match.notes[phase]?.value.trim()));
 								const isEditing = editingMatchKey === match.matchKey;
-								return <details className="event-qualification" id={`qualification-${match.matchKey}`} key={match.matchKey} open={selectedMatchKey ? match.matchKey === selectedMatchKey : index === 0}>
-								<summary><strong>Qualification {match.qualificationNumber}</strong>{hasNotes && <span className="event-qualification-note-indicator" role="img" aria-label="Notes saved" title="Notes saved"><NotesIcon /></span>}<time>{matchTimeLabel(match.scheduledTime)}</time><span>{match.teams.length ? `${match.teams.length} teams` : "Teams unavailable"}</span></summary>
+								const featuresAccountTeam = match.teams.some((number) => highlightedTeamNumbers.includes(number));
+								return <details className="event-qualification" id={`qualification-${match.matchKey}`} key={match.matchKey} open={selectedMatchKey ? match.matchKey === selectedMatchKey : false}>
+								<summary><strong className={featuresAccountTeam ? "event-qualification-featured" : undefined}>Qualification {match.qualificationNumber}</strong>{hasNotes && <span className="event-qualification-note-indicator" role="img" aria-label="Notes saved" title="Notes saved"><NotesIcon /></span>}<time>{matchTimeLabel(match.scheduledTime)}</time><span>{match.teams.length ? `${match.teams.length} teams` : "Teams unavailable"}</span></summary>
 								<div className="event-qualification-content">
 									{match.teams.length > 0 && <div className="event-qualification-teams" aria-label="Teams in this qualification">
 										{match.teams.map((number) => <a key={number} href={searchTeamUrl(league, season, number)}>{number}</a>)}
@@ -297,7 +358,8 @@ export default function EventDetailPage() {
 									})}</div>}
 								</div>
 								</details>;
-							})}</div> : <p className="empty-event-results">No qualification matches are available for this event.</p>}
+								})}</div> : <p className="empty-event-results">{eventData.matches.length ? "No qualification matches featuring your account teams are available." : "No qualification matches are available for this event."}</p>}
+							</details>
 						</section>
 					</>}
 				</div>

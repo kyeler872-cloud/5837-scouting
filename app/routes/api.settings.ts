@@ -21,7 +21,13 @@ type DashboardShortcut = {
 	teamNumber?: string;
 	eventCode?: string;
 };
-type PersonalSettings = { teamNumber: number; theme: "dark" | "light"; shortcuts: DashboardShortcut[] };
+type PersonalSettings = {
+	teamNumber: 5837;
+	ftcTeamNumber: 7247 | 5445;
+	teamPreset: "SLB" | "FTC";
+	theme: "dark" | "light";
+	shortcuts: DashboardShortcut[];
+};
 
 const defaultWeights: CompatibilityWeights = {
 	flowerCapability: 50,
@@ -32,8 +38,18 @@ const defaultWeights: CompatibilityWeights = {
 	hiveShooterType: 50,
 };
 const weightFields = Object.keys(defaultWeights) as (keyof CompatibilityWeights)[];
-const defaultPersonalSettings: PersonalSettings = { teamNumber: 5837, theme: "dark", shortcuts: [] };
-const validTeams = [7247, 5445, 5837];
+const defaultPersonalSettings: PersonalSettings = {
+	teamNumber: 5837,
+	ftcTeamNumber: 7247,
+	teamPreset: "SLB",
+	theme: "dark",
+	shortcuts: [],
+};
+const validFtcTeams = [7247, 5445] as const;
+
+function isValidFtcTeamNumber(value: number): value is PersonalSettings["ftcTeamNumber"] {
+	return validFtcTeams.some((teamNumber) => teamNumber === value);
+}
 
 function parseShortcuts(value: unknown): DashboardShortcut[] | null {
 	if (!Array.isArray(value) || value.length > 12) return null;
@@ -99,9 +115,9 @@ async function readSettings(db: D1Database) {
 }
 
 async function readPersonalSettings(db: D1Database, userId: string): Promise<PersonalSettings> {
-	const row = await db.prepare("SELECT team_number, theme, shortcuts FROM user_settings WHERE user_id = ?")
+	const row = await db.prepare("SELECT team_number, ftc_team_number, team_preset, theme, shortcuts FROM user_settings WHERE user_id = ?")
 		.bind(userId)
-		.first<{ team_number: number; theme: string; shortcuts: string }>();
+		.first<{ team_number: number; ftc_team_number: number; team_preset: string; theme: string; shortcuts: string }>();
 	if (!row) return defaultPersonalSettings;
 	let parsedShortcuts: unknown;
 	try {
@@ -109,10 +125,29 @@ async function readPersonalSettings(db: D1Database, userId: string): Promise<Per
 	} catch {
 		parsedShortcuts = [];
 	}
+	const teamPreset: PersonalSettings["teamPreset"] = row.team_preset === "FTC" ? "FTC" : "SLB";
 	return {
-		teamNumber: validTeams.includes(row.team_number) ? row.team_number : defaultPersonalSettings.teamNumber,
+		teamNumber: 5837,
+		ftcTeamNumber: teamPreset === "SLB"
+			? 7247
+			: isValidFtcTeamNumber(row.ftc_team_number) ? row.ftc_team_number : defaultPersonalSettings.ftcTeamNumber,
+		teamPreset,
 		theme: row.theme === "light" ? "light" : "dark",
 		shortcuts: parseShortcuts(parsedShortcuts) || [],
+	};
+}
+
+async function readAccountPersonalSettings(env: SettingsEnv, userId: string) {
+	if (!env.SCOUTING_DB) throw new Error("Shared scouting storage is not configured.");
+	const [personal, contributor] = await Promise.all([
+		readPersonalSettings(env.SCOUTING_DB, userId),
+		getContributorSetup(env, userId),
+	]);
+	return {
+		personal: contributor.required
+			? { ...personal, teamNumber: 5837 as const, ftcTeamNumber: 7247 as const, teamPreset: "SLB" as const }
+			: personal,
+		teamSelectionLocked: contributor.required,
 	};
 }
 
@@ -126,9 +161,9 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 		if (new URL(request.url).searchParams.get("scope") === "contributor") {
 			return json({ contributor: await getContributorSetup(env, session.sub) });
 		}
-		const personal = await readPersonalSettings(env.SCOUTING_DB, session.sub);
-		if (new URL(request.url).searchParams.get("scope") === "personal") return json({ personal });
-		return json({ ...await readSettings(env.SCOUTING_DB), personal });
+		const accountSettings = await readAccountPersonalSettings(env, session.sub);
+		if (new URL(request.url).searchParams.get("scope") === "personal") return json(accountSettings);
+		return json({ ...await readSettings(env.SCOUTING_DB), ...accountSettings });
 	} catch (error) {
 		console.error(JSON.stringify({ message: "Could not load compatibility settings", error: error instanceof Error ? error.message : String(error) }));
 		return json({ error: "Could not load compatibility settings. Confirm the latest database migration has been applied." }, 503);
@@ -142,7 +177,12 @@ export async function action({ request, context }: Route.ActionArgs) {
 	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
 
-	let body: { action?: unknown; contributorName?: unknown; weights?: unknown; personal?: { teamNumber?: unknown; theme?: unknown; shortcuts?: unknown } };
+	let body: {
+		action?: unknown;
+		contributorName?: unknown;
+		weights?: unknown;
+		personal?: { teamNumber?: unknown; ftcTeamNumber?: unknown; teamPreset?: unknown; theme?: unknown; shortcuts?: unknown };
+	};
 	try {
 		body = await request.json() as typeof body;
 	} catch {
@@ -168,21 +208,39 @@ export async function action({ request, context }: Route.ActionArgs) {
 		}
 	}
 	if (body.personal) {
-		const { teamNumber, theme } = body.personal;
-		if (typeof teamNumber !== "number" || !validTeams.includes(teamNumber) || (theme !== "dark" && theme !== "light")) {
+		const { teamNumber, ftcTeamNumber, teamPreset, theme } = body.personal;
+		let teamSelectionLocked = false;
+		try {
+			teamSelectionLocked = (await getContributorSetup(env, session.sub)).required;
+		} catch (error) {
+			console.error(JSON.stringify({ message: "Could not verify account team settings", error: error instanceof Error ? error.message : String(error) }));
+			return json({ error: "Could not verify your account team settings." }, 503);
+		}
+		if (
+			teamNumber !== 5837 ||
+			typeof ftcTeamNumber !== "number" ||
+			!isValidFtcTeamNumber(ftcTeamNumber) ||
+			(teamPreset !== "SLB" && teamPreset !== "FTC") ||
+			(teamPreset === "SLB" && ftcTeamNumber !== 7247) ||
+			(theme !== "dark" && theme !== "light")
+		) {
 			return json({ error: "Choose a valid team and theme." }, 400);
+		}
+		if (teamSelectionLocked && (teamPreset !== "SLB" || ftcTeamNumber !== 7247)) {
+			return json({ error: "This account's team membership is locked to FRC 5837 and FTC 7247 + 5445." }, 403);
 		}
 		try {
 			const shortcuts = body.personal.shortcuts === undefined
 				? (await readPersonalSettings(env.SCOUTING_DB, session.sub)).shortcuts
 				: parseShortcuts(body.personal.shortcuts);
 			if (!shortcuts) return json({ error: "Add up to 12 valid dashboard shortcuts." }, 400);
-			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings (user_id, team_number, theme, shortcuts, updated_at)
-				VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-				ON CONFLICT(user_id) DO UPDATE SET team_number = excluded.team_number, theme = excluded.theme, shortcuts = excluded.shortcuts, updated_at = excluded.updated_at`)
-				.bind(session.sub, teamNumber, theme, JSON.stringify(shortcuts))
+			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings (user_id, team_number, ftc_team_number, team_preset, theme, shortcuts, updated_at)
+				VALUES (?, 5837, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				ON CONFLICT(user_id) DO UPDATE SET team_number = 5837, ftc_team_number = excluded.ftc_team_number,
+				team_preset = excluded.team_preset, theme = excluded.theme, shortcuts = excluded.shortcuts, updated_at = excluded.updated_at`)
+				.bind(session.sub, ftcTeamNumber, teamPreset, theme, JSON.stringify(shortcuts))
 				.run();
-			return json({ personal: await readPersonalSettings(env.SCOUTING_DB, session.sub) });
+			return json(await readAccountPersonalSettings(env, session.sub));
 		} catch (error) {
 			console.error(JSON.stringify({ message: "Could not save personal settings", error: error instanceof Error ? error.message : String(error) }));
 			return json({ error: "Could not save personal settings. Confirm the latest database migration has been applied." }, 503);
@@ -198,7 +256,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 			ON CONFLICT(id) DO UPDATE SET weights = excluded.weights, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
 			.bind(JSON.stringify(weights), actor.accountName)
 			.run();
-		return json({ ...await readSettings(env.SCOUTING_DB), personal: await readPersonalSettings(env.SCOUTING_DB, session.sub) });
+		return json({ ...await readSettings(env.SCOUTING_DB), ...await readAccountPersonalSettings(env, session.sub) });
 	} catch (error) {
 		console.error(JSON.stringify({ message: "Could not save compatibility settings", error: error instanceof Error ? error.message : String(error) }));
 		return json({ error: "Could not save compatibility settings. Confirm the latest database migration has been applied." }, 503);

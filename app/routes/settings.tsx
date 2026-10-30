@@ -39,8 +39,14 @@ type DashboardShortcut = {
 	teamNumber?: string;
 	eventCode?: string;
 };
-type PersonalSettings = { teamNumber: number; theme: "dark" | "light"; shortcuts: DashboardShortcut[] };
-type CompatibilitySettings = { weights: CompatibilityWeights; updatedBy: string | null; updatedAt: string | null; personal: PersonalSettings };
+type PersonalSettings = {
+	teamNumber: 5837;
+	ftcTeamNumber: 7247 | 5445;
+	teamPreset: "SLB" | "FTC";
+	theme: "dark" | "light";
+	shortcuts: DashboardShortcut[];
+};
+type CompatibilitySettings = { weights: CompatibilityWeights; updatedBy: string | null; updatedAt: string | null; personal: PersonalSettings; teamSelectionLocked: boolean };
 
 const defaultWeights: CompatibilityWeights = {
 	flowerCapability: 50,
@@ -91,7 +97,8 @@ export default function SettingsPage() {
 	const [isSavingWeights, setIsSavingWeights] = useState(false);
 	const [settingsError, setSettingsError] = useState("");
 	const [settingsNotice, setSettingsNotice] = useState("");
-	const [personal, setPersonal] = useState<PersonalSettings>({ teamNumber: 5837, theme: "dark", shortcuts: [] });
+	const [personal, setPersonal] = useState<PersonalSettings>({ teamNumber: 5837, ftcTeamNumber: 7247, teamPreset: "SLB", theme: "dark", shortcuts: [] });
+	const [teamSelectionLocked, setTeamSelectionLocked] = useState(false);
 	const [isSavingPersonal, setIsSavingPersonal] = useState(false);
 	const [personalError, setPersonalError] = useState("");
 	const [personalNotice, setPersonalNotice] = useState("");
@@ -108,6 +115,7 @@ export default function SettingsPage() {
 			setUpdatedBy(data.updatedBy);
 			setUpdatedAt(data.updatedAt);
 			setPersonal(data.personal);
+			setTeamSelectionLocked(Boolean(data.teamSelectionLocked));
 		} catch (loadError) {
 			setSettingsError(loadError instanceof Error ? loadError.message : "Could not load compatibility settings.");
 		} finally {
@@ -127,9 +135,10 @@ export default function SettingsPage() {
 				headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
 				body: JSON.stringify({ personal }),
 			});
-			const data = await parseResponse<{ personal?: PersonalSettings }>(response);
+			const data = await parseResponse<{ personal?: PersonalSettings; teamSelectionLocked?: boolean }>(response);
 			if (!response.ok || !data.personal) throw new Error(data.error || "Could not save personal settings.");
 			setPersonal(data.personal);
+			setTeamSelectionLocked(Boolean(data.teamSelectionLocked));
 			document.documentElement.dataset.theme = data.personal.theme;
 			setPersonalNotice("Personal settings saved.");
 		} catch (saveError) {
@@ -253,7 +262,7 @@ export default function SettingsPage() {
 					<header className="logs-heading">
 						<p className="section-kicker">Account preferences</p>
 						<h1>Settings</h1>
-						<p>Choose your team and display theme, then review the shared scouting settings available to your account.</p>
+						<p>Your account includes FRC 5837. Choose an FTC team and dashboard default, then review the shared scouting settings available to your account.</p>
 					</header>
 					{error && <p className="lookup-error" role="alert">{error}</p>}
 					{settingsError && <p className="lookup-error" role="alert">{settingsError}</p>}
@@ -265,13 +274,24 @@ export default function SettingsPage() {
 						{personalError && <p className="lookup-error" role="alert">{personalError}</p>}
 						{personalNotice && <p className="settings-saved" role="status">{personalNotice}</p>}
 						<form className="personal-settings-form" onSubmit={(event) => void savePersonalSettings(event)}>
-							<label>Team
-								<select value={personal.teamNumber === 5837 ? "" : personal.teamNumber} onChange={(event) => setPersonal((current) => ({ ...current, teamNumber: Number(event.target.value) }))}>
-									<option value="" disabled>Select an FTC team</option>
-									<option value={7247}>FTC 7247</option>
-									<option value={5445}>FTC 5445</option>
-								</select>
-								<small className="personal-team-default">{personal.teamNumber === 5837 ? "Default team: FRC 5837" : "FRC 5837 is the default for new accounts."}</small>
+							<label>{teamSelectionLocked ? "Team membership" : "FTC team"}
+								{teamSelectionLocked
+									? <p className="personal-team-default">iPad is part of FRC 5837, FTC 7247, and FTC 5445. This membership is fixed.</p>
+									: <select
+										value={personal.teamPreset === "SLB" ? "SLB" : String(personal.ftcTeamNumber)}
+										onChange={(event) => setPersonal((current) => event.target.value === "SLB"
+											? { ...current, teamNumber: 5837, ftcTeamNumber: 7247, teamPreset: "SLB" }
+											: { ...current, teamNumber: 5837, ftcTeamNumber: event.target.value === "5445" ? 5445 : 7247, teamPreset: "FTC" })}
+									>
+										<option value="7247">FTC 7247</option>
+										<option value="5445">FTC 5445</option>
+										<option value="SLB">SLB — FRC 5837 + FTC 7247</option>
+									</select>}
+								{!teamSelectionLocked && <small className="personal-team-default">
+									{personal.teamPreset === "SLB"
+										? "SLB shows both FRC 5837 and FTC 7247 on your dashboard."
+										: `FRC 5837 is also part of your account. FTC ${personal.ftcTeamNumber} is your selected FTC team.`}
+								</small>}
 							</label>
 							<fieldset className="theme-choice">
 								<legend>Appearance</legend>

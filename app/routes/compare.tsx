@@ -74,6 +74,7 @@ export default function Compare() {
 	const [startTeamNumber, setStartTeamNumber] = useState("");
 	const [startLeague, setStartLeague] = useState<"FTC" | "FRC">("FTC");
 	const [startSeason, setStartSeason] = useState("2026");
+	const [matchSeason, setMatchSeason] = useState(season || "2026");
 	const [isLoadingSelected, setIsLoadingSelected] = useState(false);
 	const [isComparing, setIsComparing] = useState(false);
 	const [matchTeamNumbers, setMatchTeamNumbers] = useState(() => ({
@@ -189,7 +190,7 @@ export default function Compare() {
 		}
 
 		const comparisonLeague = league || startLeague;
-		const comparisonSeason = season || startSeason;
+		const comparisonSeason = matchSeason;
 		setIsLoadingMatchComparison(true);
 		setMatchComparison(null);
 		setMatchComparisonError("");
@@ -238,6 +239,10 @@ export default function Compare() {
 	const profileUrl = league && season && teamNumber
 		? `/home?${new URLSearchParams({ team: teamNumber, league, season })}`
 		: "/home";
+	const matchLeague = league || startLeague;
+	const matchSeasonOptions = matchLeague === "FTC"
+		? [2026, 2025, 2024, 2023, 2022, 2021, 2020]
+		: Array.from({ length: 35 }, (_, index) => 2026 - index);
 	const allTeams = selectedTeam ? [selectedTeam, ...comparisonTeams] : [];
 	const autoColors = ["#f4f8ff", "#ffe08a", "#76e2b5", "#ff9caf"];
 	const chosenAutos = allTeams.flatMap((team, teamIndex) => {
@@ -291,13 +296,17 @@ export default function Compare() {
 									const nextLeague = event.target.value as "FTC" | "FRC";
 									setStartLeague(nextLeague);
 									setStartSeason("2026");
+									setMatchSeason("2026");
 								}}>
 									<option value="FTC">FTC</option>
 									<option value="FRC">FRC</option>
 								</select>
 							</label>
 							<label>Season
-								<select value={startSeason} onChange={(event) => setStartSeason(event.target.value)}>
+								<select value={startSeason} onChange={(event) => {
+									setStartSeason(event.target.value);
+									setMatchSeason(event.target.value);
+								}}>
 									{(startLeague === "FTC" ? [2026, 2025, 2024, 2023, 2022, 2021, 2020] : Array.from({ length: 35 }, (_, index) => 2026 - index)).map((year) => <option key={year} value={year}>{year}-{String(year + 1).slice(-2)}</option>)}
 								</select>
 							</label>
@@ -364,17 +373,31 @@ export default function Compare() {
 							<AutoPathComparisonField paths={chosenAutos} />
 						</section>}
 					</>}
+					//start of the worst algorithm ever created ever 
 					<section className="match-compare-section" aria-labelledby="match-compare-title">
 						<header>
-							<p className="section-kicker">{league || startLeague} · {season || startSeason}</p>
+							<p className="section-kicker">{matchLeague} · {matchSeason}</p>
 							<h2 id="match-compare-title">Match comparison</h2>
 							<p>THIS IS VERY INACCURATE AND IN PROGRESS!</p>
 						</header>
 						<form className="match-compare-form" onSubmit={(event) => void compareMatchup(event)}>
+							<h3 className="match-compare-team-number-title">Team numbers</h3>
+							<label className="match-compare-season-select">Season
+								<select
+									value={matchSeason}
+									onChange={(event) => {
+										setMatchSeason(event.target.value);
+										setMatchComparison(null);
+										setMatchComparisonError("");
+									}}
+								>
+									{matchSeasonOptions.map((year) => <option key={year} value={year}>{year}-{String(year + 1).slice(-2)}</option>)}
+								</select>
+							</label>
 							{(["red", "blue"] as const).map((alliance) => <fieldset className={`match-compare-alliance match-compare-${alliance}`} key={alliance}>
 								<legend>{alliance === "red" ? "Red alliance" : "Blue alliance"}</legend>
 								{matchTeamNumbers[alliance].map((number, teamIndex) => <label key={`${alliance}-${teamIndex}`}>
-									<span>Team {teamIndex + 1}</span>
+									<span>Team number {teamIndex + 1}</span>
 									<input
 										required
 										inputMode="numeric"
@@ -388,7 +411,7 @@ export default function Compare() {
 												[alliance]: current[alliance].map((currentNumber, index) => index === teamIndex ? value : currentNumber),
 											}));
 										}}
-										aria-label={`${alliance} alliance team ${teamIndex + 1}`}
+										aria-label={`${alliance} alliance team number ${teamIndex + 1}`}
 									/>
 								</label>)}
 							</fieldset>)}
