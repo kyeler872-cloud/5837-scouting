@@ -31,6 +31,7 @@ type TeamData = {
 	customEvents: { code: string; name: string; date: string | null }[];
 };
 type EventLink = { code: string; name: string; start: string | null; end: string | null; custom?: boolean };
+type DashboardEvent = EventLink & { league: League; teamNumbers: string[] };
 type ScheduleMatch = {
 	matchKey: string;
 	qualificationNumber: number;
@@ -248,28 +249,40 @@ export function ScoutingDashboard() {
 	const currentRobots = team?.robots.filter((robot) => !robot.endMonth) || [];
 	const frcCurrentRobot = frcTeam?.robots.find((robot) => !robot.endMonth) || null;
 	const secondFtcEvents = secondFtcTeam ? eventRecords(secondFtcTeam, "FTC") : [];
-	const secondFtcUpcomingEvents = secondFtcEvents.filter((event) =>
-		!event.end || event.end.slice(0, 10) >= new Date().toISOString().slice(0, 10),
-	).slice(0, 5);
 	const secondFtcCurrentRobot = secondFtcTeam?.robots.find((robot) => !robot.endMonth) || null;
 	const currentEvent = activeEvent(events);
 	const upcomingEvents = events.filter((event) => !event.end || event.end.slice(0, 10) >= new Date().toISOString().slice(0, 10)).slice(0, 5);
+	const dashboardEvents = [
+		...events.map((event) => ({ ...event, league: "FTC" as const, teamNumbers: [teamNumber] })),
+		...(personal.teamPreset === "SLB"
+			? secondFtcEvents.map((event) => ({ ...event, league: "FTC" as const, teamNumbers: ["5445"] }))
+			: []),
+		...(personal.teamPreset === "SLB"
+			? frcEvents.map((event) => ({ ...event, league: "FRC" as const, teamNumbers: ["5837"] }))
+			: []),
+	].filter((event) => !event.end || event.end.slice(0, 10) >= new Date().toISOString().slice(0, 10))
+		.reduce<DashboardEvent[]>((combined, event) => {
+			const existing = combined.find((item) => item.league === event.league && item.code === event.code);
+			if (existing) {
+				existing.teamNumbers = [...new Set([...existing.teamNumbers, ...event.teamNumbers])];
+			} else {
+				combined.push(event);
+			}
+			return combined;
+		}, [])
+		.sort((first, second) => (first.start || "9999").localeCompare(second.start || "9999"))
+		.slice(0, 10);
 	const scheduleEvent = currentEvent || upcomingEvents[0] || events.at(-1) || null;
 	const secondFtcScheduleEvent = scheduleEventFor(secondFtcEvents);
 	const nextMatch = schedule?.matches.find((match) =>
 		!match.completed && match.teams.includes(teamNumber) && (!match.scheduledTime || (matchTime({ scheduledTime: match.scheduledTime })?.getTime() || 0) >= Date.now()),
 	) || schedule?.matches.find((match) => !match.completed && match.teams.includes(teamNumber)) || null;
 	const isRedAlliance = nextMatch?.redTeams.includes(teamNumber) || false;
-	const isBlueAlliance = nextMatch?.blueTeams.includes(teamNumber) || false;
-	const allianceTeams = isRedAlliance ? nextMatch?.redTeams || [] : isBlueAlliance ? nextMatch?.blueTeams || [] : [];
-	const opposingTeams = isRedAlliance ? nextMatch?.blueTeams || [] : nextMatch?.redTeams || [];
 	const winProbability = nextMatch?.prediction.redWinProbability === null || nextMatch?.prediction.redWinProbability === undefined
 		? null
 		: isRedAlliance ? nextMatch.prediction.redWinProbability : 1 - nextMatch.prediction.redWinProbability;
 	const secondFtcNextMatch = nextScheduledMatch(secondFtcSchedule?.matches || [], "5445");
 	const secondFtcIsRedAlliance = secondFtcNextMatch?.redTeams.includes("5445") || false;
-	const secondFtcAllianceTeams = secondFtcIsRedAlliance ? secondFtcNextMatch?.redTeams || [] : secondFtcNextMatch?.blueTeams || [];
-	const secondFtcOpposingTeams = secondFtcIsRedAlliance ? secondFtcNextMatch?.blueTeams || [] : secondFtcNextMatch?.redTeams || [];
 	const secondFtcWinProbability = secondFtcNextMatch?.prediction.redWinProbability == null
 		? null
 		: secondFtcIsRedAlliance ? secondFtcNextMatch.prediction.redWinProbability : 1 - secondFtcNextMatch.prediction.redWinProbability;
@@ -405,67 +418,50 @@ export function ScoutingDashboard() {
 				{error && <p className="lookup-error" role="alert">{error}</p>}
 				{loading ? <p className="dashboard-status" aria-busy="true">Loading your team dashboard...</p> : <div className="dashboard-grid">
 					<section className="dashboard-tile dashboard-events-tile" aria-labelledby="dashboard-events-title">
-						<header className="dashboard-tile-heading"><div><h2 id="dashboard-events-title">Events</h2></div><a href="/events" aria-label="Browse events" title="Browse events">↗</a></header>
-						{upcomingEvents.length ? <ul className="dashboard-event-list">{upcomingEvents.map((event) => <li key={event.code}>
-							<a href={eventHref(event, league, teamNumber)}><span><strong>{event.name}</strong>{event.code === currentEvent?.code && <em>Live</em>}</span><small>{dateLabel(event.start, event.end)}</small></a>
-						</li>)}</ul> : <p className="dashboard-empty">No events are listed for this team yet.</p>}
+						<header className="dashboard-tile-heading"><div><h2 id="dashboard-events-title">Upcoming events</h2></div><a href="/events" aria-label="Browse events" title="Browse events">↗</a></header>
+						{dashboardEvents.length ? <ul className="dashboard-event-list">{dashboardEvents.map((event) => <li key={`${event.league}-${event.code}`}>
+							<a href={eventHref(event, event.league, event.teamNumbers[0])}>
+								<span><strong>{event.name}</strong>{activeEvent([event]) && <em>Live</em>}<small className="dashboard-event-team">Team{event.teamNumbers.length > 1 ? "s" : ""} {event.teamNumbers.join(", ")} · {event.league}</small></span>
+								<small>{dateLabel(event.start, event.end)}</small>
+							</a>
+						</li>)}</ul> : <p className="dashboard-empty">No upcoming events are listed for your teams.</p>}
+						{personal.teamPreset === "SLB" && secondFtcTeamError && <p className="dashboard-empty" role="status">FTC 5445 events unavailable: {secondFtcTeamError}</p>}
 					</section>
 					<section className="dashboard-tile dashboard-robot-tile" aria-labelledby="dashboard-robot-title">
-						<header className="dashboard-tile-heading"><div><h2 id="dashboard-robot-title">Current robot</h2></div><a href={`/home?${new URLSearchParams({ team: teamNumber, league, season })}`} aria-label="Open team profile" title="Open team profile">↗</a></header>
-						{currentRobots[0] ? <a className="dashboard-robot" href={`/home?${new URLSearchParams({ team: teamNumber, league, season })}`}>
+						<header className="dashboard-tile-heading"><div><h2 id="dashboard-robot-title">{personal.teamPreset === "SLB" ? "Current robots" : "Current robot"}</h2></div><a href={`/home?${new URLSearchParams({ team: teamNumber, league, season })}`} aria-label="Open team profile" title="Open team profile">↗</a></header>
+						{personal.teamPreset === "SLB" ? <div className="dashboard-current-robots">
+							{[
+								{ teamNumber, robot: currentRobots[0] || null, error: "" },
+								{ teamNumber: "5445", robot: secondFtcCurrentRobot, error: secondFtcTeamError },
+							].map(({ teamNumber: robotTeamNumber, robot, error: robotError }) => <section className="dashboard-current-robot" key={robotTeamNumber}>
+								<h3>FTC {robotTeamNumber}</h3>
+								{robot ? <a className="dashboard-robot" href={`/home?${new URLSearchParams({ team: robotTeamNumber, league, season })}`}>
+									{robot.imageUrls[0] && <img src={robot.imageUrls[0].url} alt="" />}
+									<div><strong>{robot.name || "Current robot"}</strong>{robot.description && <p>{robot.description}</p>}</div>
+								</a> : <p className="dashboard-empty">{robotError || "No robot added yet."}</p>}
+							</section>)}
+						</div> : currentRobots[0] ? <a className="dashboard-robot" href={`/home?${new URLSearchParams({ team: teamNumber, league, season })}`}>
 							{currentRobots[0].imageUrls[0] && <img src={currentRobots[0].imageUrls[0].url} alt="" />}
 							<div><strong>{currentRobots[0].name || "Current robot"}</strong><p>{currentRobots[0].description || "Open the team profile to see the robot details."}</p></div>
 						</a> : <p className="dashboard-empty">No robot added yet.</p>}
 					</section>
-					{personal.teamPreset === "SLB" && <>
-						<section className="dashboard-tile dashboard-events-tile" aria-labelledby="dashboard-second-ftc-events-title">
-							<header className="dashboard-tile-heading"><div><h2 id="dashboard-second-ftc-events-title">FTC 5445 events</h2></div><a href="/events" aria-label="Browse FTC events" title="Browse FTC events">↗</a></header>
-							{secondFtcUpcomingEvents.length ? <ul className="dashboard-event-list">{secondFtcUpcomingEvents.map((event) => <li key={event.code}>
-								<a href={eventHref(event, "FTC", "5445")}><span><strong>{event.name}</strong></span><small>{dateLabel(event.start, event.end)}</small></a>
-							</li>)}</ul> : <p className="dashboard-empty">{secondFtcTeamError || "No upcoming events are listed for FTC 5445."}</p>}
-						</section>
-						<section className="dashboard-tile dashboard-robot-tile" aria-labelledby="dashboard-second-ftc-robot-title">
-							<header className="dashboard-tile-heading"><div><h2 id="dashboard-second-ftc-robot-title">FTC 5445 current robot</h2></div><a href={`/home?${new URLSearchParams({ team: "5445", league: "FTC", season })}`} aria-label="Open FTC team 5445 profile" title="Open FTC team 5445 profile">↗</a></header>
-							{secondFtcCurrentRobot ? <a className="dashboard-robot" href={`/home?${new URLSearchParams({ team: "5445", league: "FTC", season })}`}>
-								{secondFtcCurrentRobot.imageUrls[0] && <img src={secondFtcCurrentRobot.imageUrls[0].url} alt="" />}
-								<div><strong>{secondFtcCurrentRobot.name || "Current robot"}</strong><p>{secondFtcCurrentRobot.description || "Open the team profile for details."}</p></div>
-							</a> : <p className="dashboard-empty">{secondFtcTeamError || "No robot added for FTC 5445 yet."}</p>}
-						</section>
-					</>}
 					<section className="dashboard-tile dashboard-score-tile" aria-labelledby="dashboard-score-title">
 						<header className="dashboard-tile-heading"><div><h2 id="dashboard-score-title">Score trend</h2></div><a href={`/home?${new URLSearchParams({ team: teamNumber, league, season })}`} aria-label="Open team performance" title="Open team performance">↗</a></header>
 						{team ? <ScoreTrendChart league={league} teams={[{ teamNumber, events: team.performanceByEvent }]} /> : <p className="dashboard-empty">Team performance is unavailable.</p>}
 					</section>
 					<section className="dashboard-tile dashboard-matches-tile" aria-labelledby="dashboard-matches-title">
-						<header className="dashboard-tile-heading"><div><p className="section-kicker">FTC {teamNumber}{scheduleEvent?.name ? ` · ${scheduleEvent.name}` : ""}</p><h2 id="dashboard-matches-title">Next match</h2></div>{scheduleEvent && <a href={eventHref(scheduleEvent, league, teamNumber, nextMatch?.matchKey)} aria-label={`Open FTC ${teamNumber} match notes`} title={`Open FTC ${teamNumber} match notes`}>↗</a>}</header>
-						{isLoadingSchedule ? <p className="dashboard-empty" aria-busy="true">Loading the next matchup...</p> : scheduleError ? <p className="dashboard-empty">{scheduleError}</p> : nextMatch ? <>
-							<a className="dashboard-next-match-link" href={eventHref(scheduleEvent!, league, teamNumber, nextMatch.matchKey)}><strong>Qualification {nextMatch.qualificationNumber}</strong><time>{matchTime({ scheduledTime: nextMatch.scheduledTime })?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "Time TBD"}</time></a>
-							<p className="dashboard-match-alliance"><span>With</span>{allianceTeams.filter((number) => number !== teamNumber).length ? allianceTeams.filter((number) => number !== teamNumber).map((number) => <a key={number} href={`/home?${new URLSearchParams({ team: number, league, season })}`}>{number}</a>) : <small>Alliance not listed</small>}</p>
-							<p className="dashboard-match-alliance opposing"><span>Against</span>{opposingTeams.length ? opposingTeams.map((number) => <a key={number} href={`/home?${new URLSearchParams({ team: number, league, season })}`}>{number}</a>) : <small>Alliance not listed</small>}</p>
-							<div className="dashboard-match-forecast"><strong>{winProbability === null ? "—" : `${Math.round(winProbability * 100)}%`}</strong><span>Win chance</span>
-								{nextMatch.prediction.redScore !== null && nextMatch.prediction.blueScore !== null && <small>Projected score: {isRedAlliance ? nextMatch.prediction.redScore : nextMatch.prediction.blueScore} - {isRedAlliance ? nextMatch.prediction.blueScore : nextMatch.prediction.redScore}</small>}
-							</div>
-						</> : <p className="dashboard-empty">{scheduleEvent ? "No upcoming qualification is listed for your team." : "No current or recent event is available."}</p>}
+						<header className="dashboard-tile-heading"><div><h2 id="dashboard-matches-title">Next matches</h2></div></header>
+						{isLoadingSchedule ? <p className="dashboard-empty" aria-busy="true">Loading FTC {teamNumber}'s next match...</p>
+							: scheduleError ? <p className="dashboard-empty">{scheduleError}</p>
+								: nextMatch && scheduleEvent ? <NextMatchCard event={scheduleEvent} match={nextMatch} teamNumber={teamNumber} winProbability={winProbability} favoriteTeams={personal.teamPreset === "SLB" ? ["7247", "5445"] : [teamNumber]} />
+									: <p className="dashboard-empty">{scheduleEvent ? `No upcoming qualification for FTC ${teamNumber}.` : "No current or recent FTC event is available."}</p>}
 						{personal.teamPreset === "SLB" && <div className="dashboard-second-team-match">
-							<header><p className="section-kicker">FTC 5445 · {secondFtcScheduleEvent?.name || "Event schedule"}</p><h3>Team 5445 next match</h3></header>
-							{isLoadingSecondFtcSchedule ? <p className="dashboard-empty" aria-busy="true">Loading FTC 5445's next matchup...</p>
+							{isLoadingSecondFtcSchedule ? <p className="dashboard-empty" aria-busy="true">Loading FTC 5445's next match...</p>
 								: secondFtcTeamError ? <p className="dashboard-empty" role="alert">{secondFtcTeamError}</p>
 									: secondFtcScheduleError ? <p className="dashboard-empty" role="alert">{secondFtcScheduleError}</p>
-									: secondFtcNextMatch && secondFtcScheduleEvent ? <>
-										<a className="dashboard-next-match-link" href={eventHref(secondFtcScheduleEvent, "FTC", "5445", secondFtcNextMatch.matchKey)}>
-											<strong>Qualification {secondFtcNextMatch.qualificationNumber}</strong>
-											<time>{matchTime({ scheduledTime: secondFtcNextMatch.scheduledTime })?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "Time TBD"}</time>
-										</a>
-										<p className="dashboard-match-alliance"><span>With</span>{secondFtcAllianceTeams.filter((number) => number !== "5445").length
-											? secondFtcAllianceTeams.filter((number) => number !== "5445").map((number) => <a key={number} href={"/home?" + new URLSearchParams({ team: number, league: "FTC", season })}>{number}</a>)
-											: <small>Alliance not listed</small>}</p>
-										<p className="dashboard-match-alliance opposing"><span>Against</span>{secondFtcOpposingTeams.length
-											? secondFtcOpposingTeams.map((number) => <a key={number} href={"/home?" + new URLSearchParams({ team: number, league: "FTC", season })}>{number}</a>)
-											: <small>Alliance not listed</small>}</p>
-										<div className="dashboard-match-forecast"><strong>{secondFtcWinProbability === null ? "—" : `${Math.round(secondFtcWinProbability * 100)}%`}</strong><span>Win chance</span>
-											{secondFtcNextMatch.prediction.redScore !== null && secondFtcNextMatch.prediction.blueScore !== null && <small>Projected score: {secondFtcIsRedAlliance ? secondFtcNextMatch.prediction.redScore : secondFtcNextMatch.prediction.blueScore} - {secondFtcIsRedAlliance ? secondFtcNextMatch.prediction.blueScore : secondFtcNextMatch.prediction.redScore}</small>}
-										</div>
-									</> : <p className="dashboard-empty">{secondFtcScheduleEvent ? "No upcoming qualification is listed for FTC 5445." : "No current or upcoming FTC event is listed for team 5445."}</p>}
+										: secondFtcNextMatch && secondFtcScheduleEvent
+											? <NextMatchCard event={secondFtcScheduleEvent} match={secondFtcNextMatch} teamNumber="5445" winProbability={secondFtcWinProbability} favoriteTeams={["7247", "5445"]} />
+											: <p className="dashboard-empty">{secondFtcScheduleEvent ? "No upcoming qualification for FTC 5445." : "No current or upcoming FTC event is listed for team 5445."}</p>}
 						</div>}
 					</section>
 					<section className="dashboard-tile dashboard-shortcuts-tile" aria-labelledby="dashboard-shortcuts-title">
@@ -496,12 +492,6 @@ export function ScoutingDashboard() {
 									<p><span>Auto</span><strong>{frcTeam?.performance.auto.average ?? "—"}</strong><small>{frcTeam?.performance.auto.matchCount ?? 0} matches</small></p>
 								</div>
 							</div>
-							<div>
-								<strong>Events</strong>
-								{frcEvents.length ? <ul className="dashboard-event-list">{frcEvents.slice(0, 4).map((event) => <li key={event.code}>
-									<a href={eventHref(event, "FRC", "5837")}><span><strong>{event.name}</strong></span><small>{dateLabel(event.start, event.end)}</small></a>
-								</li>)}</ul> : <p className="dashboard-empty">No events are listed for this team yet.</p>}
-							</div>
 						</div>
 						{frcTeam && <ScoreTrendChart league="FRC" teams={[{ teamNumber: "5837", events: frcTeam.performanceByEvent }]} />}
 					</section>}
@@ -509,4 +499,46 @@ export function ScoutingDashboard() {
 			</div>
 		</main>
 	);
+}
+
+function NextMatchCard({ event, match, teamNumber, winProbability, favoriteTeams }: {
+	event: EventLink;
+	match: ScheduleMatch;
+	teamNumber: string;
+	winProbability: number | null;
+	favoriteTeams: string[];
+}) {
+	const isRedAlliance = match.redTeams.includes(teamNumber);
+	const scheduledTime = matchTime({ scheduledTime: match.scheduledTime });
+	const projectedOwnScore = isRedAlliance ? match.prediction.redScore : match.prediction.blueScore;
+	const projectedOpponentScore = isRedAlliance ? match.prediction.blueScore : match.prediction.redScore;
+
+	function renderAllianceTeams(teams: string[]) {
+		if (!teams.length) return <small>Teams unavailable</small>;
+		return teams.map((number) => <a
+			key={number}
+			href={`/home?${new URLSearchParams({ team: number, league: "FTC", season })}`}
+			className={favoriteTeams.includes(number) ? "dashboard-match-team-featured" : undefined}
+		>
+			{favoriteTeams.includes(number) ? <strong>{number}</strong> : number}
+		</a>);
+	}
+
+	return <article className="dashboard-next-match-card">
+		<header className="dashboard-next-match-heading">
+			<div><p className="section-kicker">FTC {teamNumber} · {event.name}</p>
+				<a className="dashboard-next-match-link" href={eventHref(event, "FTC", teamNumber, match.matchKey)}>
+					<strong>Qualification {match.qualificationNumber}</strong>
+					<time>{scheduledTime?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "Time TBD"}</time>
+				</a>
+			</div>
+		</header>
+		<div className="dashboard-match-alliances" aria-label={`Teams playing in qualification ${match.qualificationNumber}`}>
+			<section className="dashboard-match-alliance-red"><h4>Red alliance</h4><div>{renderAllianceTeams(match.redTeams)}</div></section>
+			<section className="dashboard-match-alliance-blue"><h4>Blue alliance</h4><div>{renderAllianceTeams(match.blueTeams)}</div></section>
+		</div>
+		<div className="dashboard-match-forecast"><strong>{winProbability === null ? "—" : `${Math.round(winProbability * 100)}%`}</strong><span>Win chance</span>
+			{projectedOwnScore !== null && projectedOpponentScore !== null && <small>Projected score: {projectedOwnScore} - {projectedOpponentScore}</small>}
+		</div>
+	</article>;
 }
