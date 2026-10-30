@@ -1,8 +1,9 @@
 import type { Route } from "./+types/compare";
-import { UserButton, useAuth } from "@clerk/react-router";
+import { useAuth } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { Protected } from "../protected";
+import { TopNavigation } from "../components/top-navigation";
 import { ScoreTrendChart, type ComparisonTeam } from "../components/score-trend-chart";
 import { AutoPathComparisonField, type RobotAuto } from "../components/auto-path-field";
 
@@ -11,9 +12,34 @@ type TeamResponse = {
 	teamNumber: string;
 	season: string;
 	performanceByEvent: ComparisonTeam["events"];
-	robots: { id: string; name: string; autos: RobotAuto[] }[];
+	performance: { teleop: { average: string | null; matchCount: number } };
+	robots: {
+		id: string;
+		name: string;
+		description: string;
+		scoringCapabilities: {
+			flower: boolean;
+			flowerActions: ("Take from" | "Input into")[];
+			hive: boolean;
+			hivePosition: "Underhand" | "Overhand" | null;
+			hiveShooterType: "Fixed" | "Dynamic" | null;
+		};
+		autos: RobotAuto[];
+	}[];
 };
-type ComparisonTeamData = ComparisonTeam & { robots: TeamResponse["robots"] };
+type ComparisonTeamData = ComparisonTeam & {
+	robots: TeamResponse["robots"];
+	teleop: TeamResponse["performance"]["teleop"];
+};
+type MatchComparisonTeam = Pick<ComparisonTeamData, "teamNumber" | "robots" | "teleop">;
+type MatchComparisonResult = {
+	league: "FTC" | "FRC";
+	season: string;
+	red: MatchComparisonTeam[];
+	blue: MatchComparisonTeam[];
+	redAverage: number | null;
+	blueAverage: number | null;
+};
 
 function teamApiUrl(teamNumber: string, season: string, league: "FTC" | "FRC") {
 	return `/api/teams/${encodeURIComponent(teamNumber)}?${new URLSearchParams({ season, league: league.toLowerCase() })}`;
@@ -40,6 +66,7 @@ export default function Compare() {
 	const leagueParam = searchParams.get("league")?.toUpperCase();
 	const league = leagueParam === "FTC" || leagueParam === "FRC" ? leagueParam : null;
 	const season = searchParams.get("season") || "";
+	const cameFromTeamPage = searchParams.get("from") === "team";
 	const [selectedTeam, setSelectedTeam] = useState<ComparisonTeamData | null>(null);
 	const [comparisonTeams, setComparisonTeams] = useState<ComparisonTeamData[]>([]);
 	const [selectedAutos, setSelectedAutos] = useState<Record<string, string>>({});
@@ -49,6 +76,13 @@ export default function Compare() {
 	const [startSeason, setStartSeason] = useState("2026");
 	const [isLoadingSelected, setIsLoadingSelected] = useState(false);
 	const [isComparing, setIsComparing] = useState(false);
+	const [matchTeamNumbers, setMatchTeamNumbers] = useState(() => ({
+		red: [cameFromTeamPage ? teamNumber : "", ""],
+		blue: ["", ""],
+	}));
+	const [matchComparison, setMatchComparison] = useState<MatchComparisonResult | null>(null);
+	const [isLoadingMatchComparison, setIsLoadingMatchComparison] = useState(false);
+	const [matchComparisonError, setMatchComparisonError] = useState("");
 	const [error, setError] = useState("");
 
 	useEffect(() => {
@@ -81,7 +115,7 @@ export default function Compare() {
 				}
 				if (cancelled) return;
 				const team = data as TeamResponse;
-				setSelectedTeam({ teamNumber: team.teamNumber, events: team.performanceByEvent, robots: team.robots || [] });
+				setSelectedTeam({ teamNumber: team.teamNumber, events: team.performanceByEvent, robots: team.robots || [], teleop: team.performance.teleop });
 			} catch (loadError) {
 				if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load the selected team.");
 			} finally {
@@ -131,12 +165,73 @@ export default function Compare() {
 				throw new Error("error" in data ? data.error || "Could not load comparison team." : "Could not load comparison team.");
 			}
 			const team = data as TeamResponse;
-			setComparisonTeams((current) => [...current, { teamNumber: team.teamNumber, events: team.performanceByEvent, robots: team.robots || [] }]);
+			setComparisonTeams((current) => [...current, { teamNumber: team.teamNumber, events: team.performanceByEvent, robots: team.robots || [], teleop: team.performance.teleop }]);
 			setComparisonInput("");
 		} catch (compareError) {
 			setError(compareError instanceof Error ? compareError.message : "Could not load comparison team.");
 		} finally {
 			setIsComparing(false);
+		}
+	}
+
+	async function compareMatchup(event: React.FormEvent<HTMLFormElement>) {
+		event.preventDefault();
+		const redNumbers = matchTeamNumbers.red.map((number) => number.trim());
+		const blueNumbers = matchTeamNumbers.blue.map((number) => number.trim());
+		const numbers = [...redNumbers, ...blueNumbers];
+		if (numbers.some((number) => !/^\d{1,6}$/.test(number))) {
+			setMatchComparisonError("Enter a valid team number in all four fields.");
+			return;
+		}
+		if (new Set(numbers).size !== numbers.length) {
+			setMatchComparisonError("Each team can only appear once in the matchup.");
+			return;
+		}
+
+		const comparisonLeague = league || startLeague;
+		const comparisonSeason = season || startSeason;
+		setIsLoadingMatchComparison(true);
+		setMatchComparison(null);
+		setMatchComparisonError("");
+		try {
+			const token = await getToken();
+			const teams = await Promise.all(numbers.map(async (number): Promise<MatchComparisonTeam> => {
+				const response = await fetch(teamApiUrl(number, comparisonSeason, comparisonLeague), {
+					headers: token ? { Authorization: "Bearer " + token } : undefined,
+				});
+				const data = await readResponse<TeamResponse | { error?: string }>(response);
+				if (!response.ok) {
+					throw new Error("error" in data ? data.error || `Could not load team ${number}.` : `Could not load team ${number}.`);
+				}
+				const team = data as TeamResponse;
+				return {
+					teamNumber: team.teamNumber,
+					teleop: team.performance.teleop,
+					robots: team.robots || [],
+				};
+			}));
+			const allianceAverage = (alliance: MatchComparisonTeam[]) => {
+				const availableScores = alliance
+					.map((team) => team.teleop.average === null ? null : Number(team.teleop.average))
+					.filter((score): score is number => score !== null && Number.isFinite(score) && score >= 0);
+				return availableScores.length
+					? availableScores.reduce((total, score) => total + score, 0) / availableScores.length
+					: null;
+			};
+			const red = teams.slice(0, 2);
+			const blue = teams.slice(2);
+			setMatchComparison({
+				league: comparisonLeague,
+				season: comparisonSeason,
+				red,
+				blue,
+				redAverage: allianceAverage(red),
+				blueAverage: allianceAverage(blue),
+			});
+		} catch (comparisonError) {
+			setMatchComparisonError(comparisonError instanceof Error ? comparisonError.message : "Could not compare these teams.");
+		} finally {
+			setIsLoadingMatchComparison(false);
 		}
 	}
 
@@ -181,18 +276,7 @@ export default function Compare() {
 	return (
 		<Protected>
 			<main className="home-shell">
-				<nav className="topbar" aria-label="Main navigation">
-					<a className="brand" href="/home"><span>Scout 5837</span></a>
-					<div className="topbar-right">
-						<div className="topbar-tabs" aria-label="Search mode">
-							<a href="/home">Team search</a>
-							<a href="/compare" aria-current="page">Compare</a>
-							<a href="/events">Event search</a>
-							<a href="/settings">Settings</a>
-						</div>
-						<UserButton />
-					</div>
-				</nav>
+				<TopNavigation currentPage="compare" />
 				<section className="comparison-page">
 					<header className="comparison-page-heading">
 						<p className="section-kicker">Season performance</p>
@@ -225,7 +309,7 @@ export default function Compare() {
 					</>}
 					{teamNumber && <p className="comparison-page-context">
 						Selected team: {league || "Unknown program"} {teamNumber} · {season || "Unknown season"}
-						{" · "}<a href={profileUrl}>Back to team profile</a>
+						{cameFromTeamPage && <>{" · "}<a href={profileUrl}>Back to robot page</a></>}
 					</p>}
 					{isLoadingSelected && <p className="comparison-page-notice" role="status">Loading selected team…</p>}
 					{error && <p className="lookup-error" role="alert">{error}</p>}
@@ -280,6 +364,83 @@ export default function Compare() {
 							<AutoPathComparisonField paths={chosenAutos} />
 						</section>}
 					</>}
+					<section className="match-compare-section" aria-labelledby="match-compare-title">
+						<header>
+							<p className="section-kicker">{league || startLeague} · {season || startSeason}</p>
+							<h2 id="match-compare-title">Match comparison</h2>
+							<p>THIS IS VERY INACCURATE AND IN PROGRESS!</p>
+						</header>
+						<form className="match-compare-form" onSubmit={(event) => void compareMatchup(event)}>
+							{(["red", "blue"] as const).map((alliance) => <fieldset className={`match-compare-alliance match-compare-${alliance}`} key={alliance}>
+								<legend>{alliance === "red" ? "Red alliance" : "Blue alliance"}</legend>
+								{matchTeamNumbers[alliance].map((number, teamIndex) => <label key={`${alliance}-${teamIndex}`}>
+									<span>Team {teamIndex + 1}</span>
+									<input
+										required
+										inputMode="numeric"
+										pattern="[0-9]*"
+										maxLength={6}
+										value={number}
+										onChange={(changeEvent) => {
+											const value = changeEvent.target.value;
+											setMatchTeamNumbers((current) => ({
+												...current,
+												[alliance]: current[alliance].map((currentNumber, index) => index === teamIndex ? value : currentNumber),
+											}));
+										}}
+										aria-label={`${alliance} alliance team ${teamIndex + 1}`}
+									/>
+								</label>)}
+							</fieldset>)}
+							<button className="search-button" type="submit" disabled={isLoadingMatchComparison}>
+								{isLoadingMatchComparison ? "Loading teams..." : "Compare match"}
+							</button>
+						</form>
+						{matchComparisonError && <p className="lookup-error" role="alert">{matchComparisonError}</p>}
+						{matchComparison && <div className="match-compare-results" aria-live="polite">
+							<p className="match-compare-season">{matchComparison.league} · {matchComparison.season}</p>
+							<div className="match-compare-score-grid">
+								{([
+									{ name: "Red", teams: matchComparison.red, average: matchComparison.redAverage },
+									{ name: "Blue", teams: matchComparison.blue, average: matchComparison.blueAverage },
+								]).map((alliance) => <article className={`match-compare-card match-compare-${alliance.name.toLowerCase()}`} key={alliance.name}>
+									<h3>{alliance.name} alliance</h3>
+									<p className="match-compare-score">
+										{alliance.average === null ? "No TeleOp data" : `${alliance.average.toFixed(1)} avg TeleOp pts`}
+									</p>
+									{alliance.teams.map((team) => <div className="match-compare-team" key={team.teamNumber}>
+										<h4>{matchComparison.league} {team.teamNumber}</h4>
+										<p>{team.teleop.average === null
+											? "No average TeleOp score available"
+											: `Avg TeleOp: ${team.teleop.average} pts across ${team.teleop.matchCount} matches`}</p>
+										<div className="match-compare-strategies">
+											<strong>Registered game strategy</strong>
+											{team.robots.length ? team.robots.map((robot) => {
+												const capabilities = robot.scoringCapabilities;
+												const strategyItems = [
+													...(capabilities.flower ? [`Flower${capabilities.flowerActions.length ? ` · ${capabilities.flowerActions.join(" / ")}` : ""}`] : []),
+													...(capabilities.hive ? [`Hive${capabilities.hivePosition ? ` · ${capabilities.hivePosition}` : ""}${capabilities.hiveShooterType ? ` · ${capabilities.hiveShooterType}` : ""}`] : []),
+												];
+												return <div key={robot.id}>
+													{robot.name && <span>{robot.name}</span>}
+													{robot.description && <p>{robot.description}</p>}
+													{strategyItems.length > 0 && <p>{strategyItems.join(" · ")}</p>}
+												</div>;
+											}) : <p>No robot strategy has been added to this team profile.</p>}
+										</div>
+									</div>)}
+								</article>)}
+							</div>
+							{matchComparison.redAverage === null || matchComparison.blueAverage === null
+								? <p className="match-compare-verdict">A projected winner needs TeleOp data for at least one team on each alliance.</p>
+								: matchComparison.redAverage === matchComparison.blueAverage
+									? <p className="match-compare-verdict">Projected tie: both alliances average {matchComparison.redAverage.toFixed(1)} TeleOp points.</p>
+									: <p className="match-compare-verdict">
+										{matchComparison.redAverage > matchComparison.blueAverage ? "Red" : "Blue"} alliance is favored based on its higher projected TeleOp average.
+									</p>}
+							<p className="match-compare-caveat">This is a historical TeleOp estimate, not a guaranteed result. Robot strategies are shown for context and do not add an assumed point bonus.</p>
+						</div>}
+					</section>
 				</section>
 			</main>
 		</Protected>

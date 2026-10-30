@@ -1,23 +1,35 @@
-import { UserButton, useAuth } from "@clerk/react-router";
-import { useEffect, useState } from "react";
+import { useAuth } from "@clerk/react-router";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router";
 import type { Route } from "./+types/event-detail";
 import { Protected } from "../protected";
+import { TopNavigation } from "../components/top-navigation";
 
 type League = "FTC" | "FRC";
 type EventTeam = { number: string; name: string; manual: boolean };
+type MatchPhase = "Auto" | "TeleOp" | "Endgame";
+type MatchNote = { value: string; displayName: string };
+type EventMatch = {
+	matchKey: string;
+	qualificationNumber: number;
+	teams: string[];
+	scheduledTime: string | null;
+	notes: Partial<Record<MatchPhase, MatchNote>>;
+};
 type EventData = {
 	league: League;
 	season: string;
 	eventCode: string;
 	event: { name: string; startDate: string | null; endDate: string | null; city: string; state: string; country: string; region: string; custom: boolean };
 	teams: EventTeam[];
+	matches: EventMatch[];
 	notes: Record<string, { value: string; displayName: string }>;
 	photosUrl: string;
 	warning: string | null;
 };
 type NoteCategory = "Matches" | "Playoffs" | "Notes";
 const categories: NoteCategory[] = ["Matches", "Playoffs", "Notes"];
+const matchPhases: MatchPhase[] = ["Auto", "TeleOp", "Endgame"];
 
 async function readResponse<T>(response: Response): Promise<T> {
 	const text = await response.text();
@@ -42,6 +54,18 @@ function searchTeamUrl(league: League, season: string, number: string) {
 	return `/home?${params}`;
 }
 
+function renderLinkedTeamNumbers(text: string, league: League, season: string) {
+	return text.split(/(\b\d{4,5}\b)/g).map((part, index) => /^\d{4,5}$/.test(part)
+		? <a className="event-note-team-link" key={`${part}-${index}`} href={searchTeamUrl(league, season, part)}>{part}</a>
+		: part);
+}
+
+function matchTimeLabel(value: string | null) {
+	if (!value) return "Time TBD";
+	const time = new Date(value);
+	return Number.isNaN(time.getTime()) ? value : time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
 export function meta({}: Route.MetaArgs) {
 	return [{ title: "Event | Scout 5837" }, { name: "description", content: "Event details, team roster, and scouting notes." }];
 }
@@ -58,10 +82,14 @@ export default function EventDetailPage() {
 	const [draft, setDraft] = useState("");
 	const [teamNumber, setTeamNumber] = useState("");
 	const [teamName, setTeamName] = useState("");
+	const [matchDrafts, setMatchDrafts] = useState<Record<string, Partial<Record<MatchPhase, string>>>>({});
+	const [editingMatchKey, setEditingMatchKey] = useState<string | null>(null);
 	const [error, setError] = useState("");
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
 	const query = new URLSearchParams(location.search);
+	const selectedMatchKey = query.get("match") || "";
+	const lastScrolledMatchKey = useRef("");
 	const requestedReturn = query.get("returnTo") || "";
 	const returnTo = requestedReturn.startsWith("/home") || requestedReturn.startsWith("/events") ? requestedReturn : "/events";
 
@@ -82,6 +110,10 @@ export default function EventDetailPage() {
 					const loaded = data as EventData;
 					setEventData(loaded);
 					setDraft(loaded.notes[category]?.value || "");
+					setMatchDrafts(Object.fromEntries(loaded.matches.map((match) => [
+						match.matchKey,
+						Object.fromEntries(matchPhases.map((phase) => [phase, match.notes[phase]?.value || ""])),
+					])));
 				}
 			} catch (loadError) {
 				if (!cancelled) setError(loadError instanceof Error ? loadError.message : "Could not load event.");
@@ -96,6 +128,14 @@ export default function EventDetailPage() {
 	useEffect(() => {
 		setDraft(eventData?.notes[category]?.value || "");
 	}, [category, eventData]);
+
+	useEffect(() => {
+		if (!eventData || !selectedMatchKey || lastScrolledMatchKey.current === selectedMatchKey) return;
+		const match = eventData.matches.find((item) => item.matchKey === selectedMatchKey);
+		if (!match) return;
+		lastScrolledMatchKey.current = selectedMatchKey;
+		document.getElementById(`qualification-${selectedMatchKey}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+	}, [eventData, selectedMatchKey]);
 
 	async function save(action: Record<string, unknown>) {
 		setSaving(true);
@@ -112,6 +152,14 @@ export default function EventDetailPage() {
 			if (action.action === "note" && eventData && typeof data.category === "string") {
 				const note = data.note as { value: string; displayName: string };
 				setEventData({ ...eventData, notes: { ...eventData.notes, [data.category]: note } });
+			} else if (action.action === "match-note" && eventData && typeof data.matchKey === "string" && typeof data.phase === "string") {
+				const note = data.note as MatchNote;
+				setEventData({
+					...eventData,
+					matches: eventData.matches.map((match) => match.matchKey === data.matchKey
+						? { ...match, notes: { ...match.notes, [data.phase as MatchPhase]: note } }
+						: match),
+				});
 			} else if (action.action === "photos" && eventData && typeof data.photosUrl === "string") {
 				setEventData({ ...eventData, photosUrl: data.photosUrl });
 			} else if (eventData) {
@@ -167,13 +215,7 @@ export default function EventDetailPage() {
 	return (
 		<Protected>
 			<main className="home-shell">
-				<nav className="topbar" aria-label="Main navigation">
-					<a className="brand" href="/home"><span>Scout 5837</span></a>
-					<div className="topbar-tabs" aria-label="Search mode">
-						<a href="/home">Team search</a><a href="/compare">Compare</a><a href="/events" aria-current="page">Event search</a><a href="/settings">Settings</a>
-					</div>
-					<UserButton />
-				</nav>
+				<TopNavigation currentPage="events" />
 				<div className="event-detail-page">
 					<a className="event-back-link" href={returnTo}>← Back</a>
 					{loading && <p className="event-page-status" aria-busy="true">Loading event...</p>}
@@ -217,6 +259,46 @@ export default function EventDetailPage() {
 								<div className="event-note-actions"><button className="search-button" type="button" disabled={saving} onClick={() => void save({ action: "note", category, note: draft }).catch(() => undefined)}>{saving ? "Saving..." : "Save notes"}</button><span>{eventData.notes[category]?.displayName ? `Last updated by ${eventData.notes[category].displayName}` : "No notes yet"}</span></div>
 							</section>
 						</div>
+						<section className="event-qualifications" aria-labelledby="event-qualifications-heading">
+							<header className="event-qualifications-heading">
+								<div><p className="section-kicker">Match scouting</p><h2 id="event-qualifications-heading">Qualification matches</h2></div>
+								<p>Save Auto, TeleOp, and Endgame notes by match.</p>
+							</header>
+							{eventData.matches.length ? <div className="event-qualification-list">{eventData.matches.map((match, index) => {
+								const hasNotes = matchPhases.some((phase) => Boolean(match.notes[phase]?.value.trim()));
+								const isEditing = editingMatchKey === match.matchKey;
+								return <details className="event-qualification" id={`qualification-${match.matchKey}`} key={match.matchKey} open={selectedMatchKey ? match.matchKey === selectedMatchKey : index === 0}>
+								<summary><strong>Qualification {match.qualificationNumber}</strong>{hasNotes && <span className="event-qualification-note-indicator" role="img" aria-label="Notes saved" title="Notes saved"><NotesIcon /></span>}<time>{matchTimeLabel(match.scheduledTime)}</time><span>{match.teams.length ? `${match.teams.length} teams` : "Teams unavailable"}</span></summary>
+								<div className="event-qualification-content">
+									{match.teams.length > 0 && <div className="event-qualification-teams" aria-label="Teams in this qualification">
+										{match.teams.map((number) => <a key={number} href={searchTeamUrl(league, season, number)}>{number}</a>)}
+									</div>}
+									<header className="event-qualification-notes-heading"><h3>Scouting notes</h3><button className="event-qualification-edit" type="button" aria-expanded={isEditing} onClick={() => setEditingMatchKey(isEditing ? null : match.matchKey)}>{isEditing ? "Done" : <><PencilIcon />Edit notes</>}</button></header>
+									{isEditing ? <div className="event-match-phases">{matchPhases.map((phase) => {
+										const savedNote = match.notes[phase];
+										const value = matchDrafts[match.matchKey]?.[phase] ?? savedNote?.value ?? "";
+										return <section className="event-match-phase" key={phase}>
+											<label><span>{phase}</span><textarea rows={4} maxLength={10000} value={value} onChange={(event) => setMatchDrafts((current) => ({
+												...current,
+												[match.matchKey]: { ...current[match.matchKey], [phase]: event.target.value },
+											}))} placeholder={`Record ${phase} notes...`} /></label>
+										<div className="event-match-phase-actions"><button className="search-button" type="button" disabled={saving} onClick={async () => {
+											try {
+												await save({ action: "match-note", matchKey: match.matchKey, category: phase, note: value });
+												setEditingMatchKey(null);
+											} catch {
+												// Keep the editor open so the note can be corrected and retried.
+											}
+										}}>{saving ? "Saving..." : `Save ${phase}`}</button><span>{savedNote?.displayName || "No saved notes"}</span></div>
+										</section>;
+									})}</div> : <div className="event-match-saved-phases">{matchPhases.map((phase) => {
+										const savedNote = match.notes[phase];
+										return <section key={phase}><h4>{phase}</h4>{savedNote?.value ? <div className="event-match-saved-note">{renderLinkedTeamNumbers(savedNote.value, league, season)}</div> : <p>No notes yet</p>}{savedNote?.displayName && <small>{savedNote.displayName}</small>}</section>;
+									})}</div>}
+								</div>
+								</details>;
+							})}</div> : <p className="empty-event-results">No qualification matches are available for this event.</p>}
+						</section>
 					</>}
 				</div>
 			</main>
@@ -230,6 +312,10 @@ function SearchIcon() {
 
 function PencilIcon() {
 	return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5 4 4M4 20l4.2-.8L19 8.4a2.1 2.1 0 0 0-3-3L5.2 16.2 4 20Z" /></svg>;
+}
+
+function NotesIcon() {
+	return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.75h7l4 4v12.5H7a2 2 0 0 1-2-2v-12.5a2 2 0 0 1 2-2Z" /><path d="M14 4v4h4M8.5 12h7M8.5 15.5h7" /></svg>;
 }
 
 function PhotoIcon() {

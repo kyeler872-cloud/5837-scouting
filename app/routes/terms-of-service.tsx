@@ -1,5 +1,6 @@
 import type { Route } from "./+types/terms-of-service";
 import { Protected } from "../protected";
+import { TopNavigation } from "../components/top-navigation";
 
 export function meta({}: Route.MetaArgs) {
 	return [
@@ -12,18 +13,7 @@ export default function TermsOfService() {
 	return (
 		<Protected>
 			<main className="home-shell">
-				<nav className="topbar" aria-label="Main navigation">
-					<a className="brand" href="/home">
-						<span>Scout 5837</span>
-					</a>
-					<div className="topbar-tabs" aria-label="Search mode">
-						<a href="/home">Team search</a>
-						<a href="/compare">Compare</a>
-						<a href="/events">Event search</a>
-						<a href="/settings">Settings</a>
-					</div>
-					<a className="terms-link" href="/home">Back to home</a>
-				</nav>
+				<TopNavigation rightContent={<a className="terms-link" href="/home">Back to home</a>} />
 				<article className="terms-page">
 					<h1>Terms of Service</h1>
 					<div className="terms-content">

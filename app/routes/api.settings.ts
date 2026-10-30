@@ -1,7 +1,7 @@
 import { verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.settings";
 import { cloudflareContext } from "../cloudflare-context";
-import { getAuditActor } from "../audit.server";
+import { getAuditActor, getContributorSetup } from "../audit.server";
 
 type SettingsEnv = Env & { SCOUTING_DB?: D1Database };
 type CompatibilityWeights = {
@@ -12,6 +12,16 @@ type CompatibilityWeights = {
 	hivePosition: number;
 	hiveShooterType: number;
 };
+type DashboardShortcut = {
+	id: string;
+	kind: "event" | "team" | "comparison";
+	label: string;
+	league: "FTC" | "FRC";
+	season: string;
+	teamNumber?: string;
+	eventCode?: string;
+};
+type PersonalSettings = { teamNumber: number; theme: "dark" | "light"; shortcuts: DashboardShortcut[] };
 
 const defaultWeights: CompatibilityWeights = {
 	flowerCapability: 50,
@@ -22,6 +32,32 @@ const defaultWeights: CompatibilityWeights = {
 	hiveShooterType: 50,
 };
 const weightFields = Object.keys(defaultWeights) as (keyof CompatibilityWeights)[];
+const defaultPersonalSettings: PersonalSettings = { teamNumber: 5837, theme: "dark", shortcuts: [] };
+const validTeams = [7247, 5445, 5837];
+
+function parseShortcuts(value: unknown): DashboardShortcut[] | null {
+	if (!Array.isArray(value) || value.length > 12) return null;
+	const shortcuts: DashboardShortcut[] = [];
+	for (const item of value) {
+		if (typeof item !== "object" || item === null) return null;
+		const shortcut = item as Record<string, unknown>;
+		if (
+			typeof shortcut.id !== "string" || !/^[\da-f-]{1,60}$/i.test(shortcut.id) ||
+			typeof shortcut.label !== "string" || !shortcut.label.trim() || shortcut.label.length > 100 ||
+			(shortcut.kind !== "event" && shortcut.kind !== "team" && shortcut.kind !== "comparison") ||
+			(shortcut.league !== "FTC" && shortcut.league !== "FRC") ||
+			typeof shortcut.season !== "string" || !/^\d{4}$/.test(shortcut.season)
+		) return null;
+		if (shortcut.kind === "event") {
+			if (typeof shortcut.eventCode !== "string" || !/^[a-zA-Z0-9_-]{1,120}$/.test(shortcut.eventCode)) return null;
+			shortcuts.push({ id: shortcut.id, kind: "event", label: shortcut.label.trim(), league: shortcut.league, season: shortcut.season, eventCode: shortcut.eventCode });
+		} else {
+			if (typeof shortcut.teamNumber !== "string" || !/^\d{1,6}$/.test(shortcut.teamNumber)) return null;
+			shortcuts.push({ id: shortcut.id, kind: shortcut.kind, label: shortcut.label.trim(), league: shortcut.league, season: shortcut.season, teamNumber: shortcut.teamNumber });
+		}
+	}
+	return shortcuts;
+}
 
 function json(data: unknown, status = 200) {
 	return Response.json(data, { status, headers: { "cache-control": "private, no-store" } });
@@ -62,13 +98,37 @@ async function readSettings(db: D1Database) {
 	return { weights, updatedBy: row.updated_by_account_name, updatedAt: row.updated_at };
 }
 
+async function readPersonalSettings(db: D1Database, userId: string): Promise<PersonalSettings> {
+	const row = await db.prepare("SELECT team_number, theme, shortcuts FROM user_settings WHERE user_id = ?")
+		.bind(userId)
+		.first<{ team_number: number; theme: string; shortcuts: string }>();
+	if (!row) return defaultPersonalSettings;
+	let parsedShortcuts: unknown;
+	try {
+		parsedShortcuts = JSON.parse(row.shortcuts);
+	} catch {
+		parsedShortcuts = [];
+	}
+	return {
+		teamNumber: validTeams.includes(row.team_number) ? row.team_number : defaultPersonalSettings.teamNumber,
+		theme: row.theme === "light" ? "light" : "dark",
+		shortcuts: parseShortcuts(parsedShortcuts) || [],
+	};
+}
+
 export async function loader({ request, context }: Route.LoaderArgs) {
 	const env = context.get(cloudflareContext).env as SettingsEnv;
 	if (!env.CLERK_SECRET_KEY) return json({ error: "Server authentication is not configured." }, 503);
-	if (!await authenticate(request, env)) return json({ error: "Authentication required." }, 401);
+	const session = await authenticate(request, env);
+	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
 	try {
-		return json(await readSettings(env.SCOUTING_DB));
+		if (new URL(request.url).searchParams.get("scope") === "contributor") {
+			return json({ contributor: await getContributorSetup(env, session.sub) });
+		}
+		const personal = await readPersonalSettings(env.SCOUTING_DB, session.sub);
+		if (new URL(request.url).searchParams.get("scope") === "personal") return json({ personal });
+		return json({ ...await readSettings(env.SCOUTING_DB), personal });
 	} catch (error) {
 		console.error(JSON.stringify({ message: "Could not load compatibility settings", error: error instanceof Error ? error.message : String(error) }));
 		return json({ error: "Could not load compatibility settings. Confirm the latest database migration has been applied." }, 503);
@@ -82,11 +142,51 @@ export async function action({ request, context }: Route.ActionArgs) {
 	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
 
-	let body: { weights?: unknown };
+	let body: { action?: unknown; contributorName?: unknown; weights?: unknown; personal?: { teamNumber?: unknown; theme?: unknown; shortcuts?: unknown } };
 	try {
 		body = await request.json() as typeof body;
 	} catch {
 		return json({ error: "Invalid compatibility settings payload." }, 400);
+	}
+	if (body.action === "contributor-name") {
+		try {
+			const setup = await getContributorSetup(env, session.sub);
+			if (!setup.required) return json({ error: "Credited names are only available for the designated account." }, 403);
+			if (typeof body.contributorName !== "string") return json({ error: "Enter a credited name." }, 400);
+			const name = body.contributorName.trim();
+			if (!name || name.length > 12 || /[\r\n\0]/.test(name)) return json({ error: "Enter a name from 1 to 12 characters." }, 400);
+			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings (user_id, contributor_name, contributor_name_expires_at, updated_at)
+				VALUES (?, ?, datetime('now', '+1 hour'), CURRENT_TIMESTAMP)
+				ON CONFLICT(user_id) DO UPDATE SET contributor_name = excluded.contributor_name,
+				contributor_name_expires_at = excluded.contributor_name_expires_at, updated_at = excluded.updated_at`)
+				.bind(session.sub, name)
+				.run();
+			return json({ contributor: await getContributorSetup(env, session.sub) });
+		} catch (error) {
+			console.error(JSON.stringify({ message: "Could not save contributor name", error: error instanceof Error ? error.message : String(error) }));
+			return json({ error: "Could not save your credited name. Confirm the latest database migration has been applied." }, 503);
+		}
+	}
+	if (body.personal) {
+		const { teamNumber, theme } = body.personal;
+		if (typeof teamNumber !== "number" || !validTeams.includes(teamNumber) || (theme !== "dark" && theme !== "light")) {
+			return json({ error: "Choose a valid team and theme." }, 400);
+		}
+		try {
+			const shortcuts = body.personal.shortcuts === undefined
+				? (await readPersonalSettings(env.SCOUTING_DB, session.sub)).shortcuts
+				: parseShortcuts(body.personal.shortcuts);
+			if (!shortcuts) return json({ error: "Add up to 12 valid dashboard shortcuts." }, 400);
+			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings (user_id, team_number, theme, shortcuts, updated_at)
+				VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+				ON CONFLICT(user_id) DO UPDATE SET team_number = excluded.team_number, theme = excluded.theme, shortcuts = excluded.shortcuts, updated_at = excluded.updated_at`)
+				.bind(session.sub, teamNumber, theme, JSON.stringify(shortcuts))
+				.run();
+			return json({ personal: await readPersonalSettings(env.SCOUTING_DB, session.sub) });
+		} catch (error) {
+			console.error(JSON.stringify({ message: "Could not save personal settings", error: error instanceof Error ? error.message : String(error) }));
+			return json({ error: "Could not save personal settings. Confirm the latest database migration has been applied." }, 503);
+		}
 	}
 	const weights = parseWeights(body.weights);
 	if (!weights) return json({ error: "Each compatibility influence must be a number from 0 to 100." }, 400);
@@ -98,7 +198,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 			ON CONFLICT(id) DO UPDATE SET weights = excluded.weights, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
 			.bind(JSON.stringify(weights), actor.accountName)
 			.run();
-		return json(await readSettings(env.SCOUTING_DB));
+		return json({ ...await readSettings(env.SCOUTING_DB), personal: await readPersonalSettings(env.SCOUTING_DB, session.sub) });
 	} catch (error) {
 		console.error(JSON.stringify({ message: "Could not save compatibility settings", error: error instanceof Error ? error.message : String(error) }));
 		return json({ error: "Could not save compatibility settings. Confirm the latest database migration has been applied." }, 503);

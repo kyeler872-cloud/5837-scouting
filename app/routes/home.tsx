@@ -6,6 +6,8 @@ import { useSearchParams } from "react-router";
 import { Protected } from "../protected";
 import { ScoreTrendChart, type EventPerformance } from "../components/score-trend-chart";
 import { AutoPathField, type AutoPath, type RobotAuto } from "../components/auto-path-field";
+import { ScoutingDashboard } from "../components/scouting-dashboard";
+import { TopNavigation } from "../components/top-navigation";
 
 // quick type definition for generic json objects from api
 type JsonRecord = Record<string, unknown>;
@@ -161,6 +163,7 @@ export default function Home() {
     const [season, setSeason] = useState("2026");
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
     const showGraphs = !result || result.league !== "FRC" || records(result.events).length > 1;
+    const showDashboard = !result && searchParams.get("view") !== "search" && !searchParams.get("team");
     const [socialLinks, setSocialLinks] = useState<SocialLinks>({ website: "", facebook: "", x: "", instagram: "", youtube: "", email: "", other: "" });
     const [isEditingSocials, setIsEditingSocials] = useState(false);
     const [error, setError] = useState("");
@@ -358,23 +361,9 @@ export default function Home() {
     // renders the page UI inside protected auth wrapper
     return (
         <Protected>
+            {showDashboard ? <ScoutingDashboard /> : (
             <main className="home-shell">
-                {/* top bar with site logo and profile button */}
-                <nav className="topbar" aria-label="Main navigation">
-                    <a className="brand" href="/home">
-                        <span>Scout 5837</span>
-                    </a>
-                    <div className="topbar-right">
-                        <div className="topbar-tabs" aria-label="Search mode">
-                            <a href="/home" aria-current="page">Team search</a>
-                            <a href="/compare">Compare</a>
-                            <a href="/events">Event search</a>
-                            <a href="/settings">Settings</a>
-                        </div>
-                        <UserBadge />
-                        <UserButton />
-                    </div>
-                </nav>
+                <TopNavigation currentPage="team-search" rightContent={<><UserBadge /><UserButton /></>} />
                 {/* team search form section */}
                 <section className="scouting-search" aria-labelledby="scouting-title">
                     <p className="section-kicker">FIRST Robotics Scouting</p>
@@ -528,7 +517,7 @@ export default function Home() {
                                 {showGraphs && <section className="team-section score-trend-section" id="graphs">
                                     <div className="score-trend-heading">
                                         <SectionHeading eyebrow="Season performance" title="Team score graphs by event" />
-                                        <a className="compare-page-link" href={`/compare?${new URLSearchParams({ team: result.teamNumber, league: result.league, season: result.season })}`}>Compare with a different team <span aria-hidden="true">→</span></a>
+                                        <a className="compare-page-link" href={`/compare?${new URLSearchParams({ team: result.teamNumber, league: result.league, season: result.season, from: "team" })}`}>Compare with a different team <span aria-hidden="true">→</span></a>
                                     </div>
                                     <p className="section-description">Compare Auto and TeleOp alliance averages across the season.</p>
                                     <ScoreTrendChart league={result.league} teams={[{ teamNumber: result.teamNumber, events: result.performanceByEvent }]} />
@@ -557,6 +546,7 @@ export default function Home() {
                     ↑ <span>Back to top</span>
                 </button>}
             </main>
+            )}
         </Protected>
     );
 }

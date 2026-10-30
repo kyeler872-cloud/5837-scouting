@@ -1,7 +1,8 @@
-import { UserButton, useAuth } from "@clerk/react-router";
+import { useAuth } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import type { Route } from "./+types/settings";
 import { Protected } from "../protected";
+import { TopNavigation } from "../components/top-navigation";
 
 type AuditLog = {
 	id: string;
@@ -29,7 +30,17 @@ type CompatibilityWeights = {
 	hivePosition: number;
 	hiveShooterType: number;
 };
-type CompatibilitySettings = { weights: CompatibilityWeights; updatedBy: string | null; updatedAt: string | null };
+type DashboardShortcut = {
+	id: string;
+	kind: "event" | "team" | "comparison";
+	label: string;
+	league: "FTC" | "FRC";
+	season: string;
+	teamNumber?: string;
+	eventCode?: string;
+};
+type PersonalSettings = { teamNumber: number; theme: "dark" | "light"; shortcuts: DashboardShortcut[] };
+type CompatibilitySettings = { weights: CompatibilityWeights; updatedBy: string | null; updatedAt: string | null; personal: PersonalSettings };
 
 const defaultWeights: CompatibilityWeights = {
 	flowerCapability: 50,
@@ -80,6 +91,10 @@ export default function SettingsPage() {
 	const [isSavingWeights, setIsSavingWeights] = useState(false);
 	const [settingsError, setSettingsError] = useState("");
 	const [settingsNotice, setSettingsNotice] = useState("");
+	const [personal, setPersonal] = useState<PersonalSettings>({ teamNumber: 5837, theme: "dark", shortcuts: [] });
+	const [isSavingPersonal, setIsSavingPersonal] = useState(false);
+	const [personalError, setPersonalError] = useState("");
+	const [personalNotice, setPersonalNotice] = useState("");
 
 	async function loadCompatibilitySettings() {
 		setIsLoadingWeights(true);
@@ -92,10 +107,35 @@ export default function SettingsPage() {
 			setWeights(data.weights);
 			setUpdatedBy(data.updatedBy);
 			setUpdatedAt(data.updatedAt);
+			setPersonal(data.personal);
 		} catch (loadError) {
 			setSettingsError(loadError instanceof Error ? loadError.message : "Could not load compatibility settings.");
 		} finally {
 			setIsLoadingWeights(false);
+		}
+	}
+
+	async function savePersonalSettings(event: React.FormEvent<HTMLFormElement>) {
+		event.preventDefault();
+		setIsSavingPersonal(true);
+		setPersonalError("");
+		setPersonalNotice("");
+		try {
+			const token = await getToken();
+			const response = await fetch("/api/settings", {
+				method: "PUT",
+				headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+				body: JSON.stringify({ personal }),
+			});
+			const data = await parseResponse<{ personal?: PersonalSettings }>(response);
+			if (!response.ok || !data.personal) throw new Error(data.error || "Could not save personal settings.");
+			setPersonal(data.personal);
+			document.documentElement.dataset.theme = data.personal.theme;
+			setPersonalNotice("Personal settings saved.");
+		} catch (saveError) {
+			setPersonalError(saveError instanceof Error ? saveError.message : "Could not save personal settings.");
+		} finally {
+			setIsSavingPersonal(false);
 		}
 	}
 
@@ -208,31 +248,51 @@ export default function SettingsPage() {
 	return (
 		<Protected>
 			<main className="home-shell">
-				<nav className="topbar" aria-label="Main navigation">
-					<a className="brand" href="/home"><span>Scout 5837</span></a>
-					<div className="topbar-tabs" aria-label="Search mode">
-						<a href="/home">Team search</a>
-						<a href="/compare">Compare</a>
-						<a href="/events">Event search</a>
-						<a href="/settings" aria-current="page">Settings</a>
-					</div>
-					<UserButton />
-				</nav>
+				<TopNavigation currentPage="settings" />
 				<div className="logs-page">
 					<header className="logs-heading">
-						<p className="section-kicker">Shared preferences / Admin</p>
+						<p className="section-kicker">Account preferences</p>
 						<h1>Settings</h1>
-						<p>Configure shared FTC team-compatibility influences. Audit logs and access management stay limited to approved accounts.</p>
+						<p>Choose your team and display theme, then review the shared scouting settings available to your account.</p>
 					</header>
 					{error && <p className="lookup-error" role="alert">{error}</p>}
 					{settingsError && <p className="lookup-error" role="alert">{settingsError}</p>}
-					{settingsNotice && <p className="settings-saved" role="status">{settingsNotice}</p>}
+					<section className="personal-settings" aria-labelledby="personal-settings-title">
+						<header className="settings-section-heading">
+							<p className="section-kicker">Your account</p>
+							<h2 id="personal-settings-title">Personal Settings</h2>
+						</header>
+						{personalError && <p className="lookup-error" role="alert">{personalError}</p>}
+						{personalNotice && <p className="settings-saved" role="status">{personalNotice}</p>}
+						<form className="personal-settings-form" onSubmit={(event) => void savePersonalSettings(event)}>
+							<label>Team
+								<select value={personal.teamNumber === 5837 ? "" : personal.teamNumber} onChange={(event) => setPersonal((current) => ({ ...current, teamNumber: Number(event.target.value) }))}>
+									<option value="" disabled>Select an FTC team</option>
+									<option value={7247}>FTC 7247</option>
+									<option value={5445}>FTC 5445</option>
+								</select>
+								<small className="personal-team-default">{personal.teamNumber === 5837 ? "Default team: FRC 5837" : "FRC 5837 is the default for new accounts."}</small>
+							</label>
+							<fieldset className="theme-choice">
+								<legend>Appearance</legend>
+								<label><input type="radio" name="theme" value="dark" checked={personal.theme === "dark"} onChange={() => setPersonal((current) => ({ ...current, theme: "dark" }))} /> Dark</label>
+								<label><input type="radio" name="theme" value="light" checked={personal.theme === "light"} onChange={() => setPersonal((current) => ({ ...current, theme: "light" }))} /> Light</label>
+							</fieldset>
+							<button className="search-button" type="submit" disabled={isSavingPersonal}>{isSavingPersonal ? "Saving..." : "Save personal settings"}</button>
+						</form>
+					</section>
+					<section className="universal-settings" aria-labelledby="universal-settings-title">
+						<header className="settings-section-heading">
+							<p className="section-kicker">Shared across accounts</p>
+							<h2 id="universal-settings-title">Universal Settings</h2>
+						</header>
+						{settingsNotice && <p className="settings-saved" role="status">{settingsNotice}</p>}
 					<section className="compatibility-settings" aria-labelledby="compatibility-title">
 						<header className="compatibility-settings-heading">
 							<div>
 								<p className="section-kicker">FTC 2026–27</p>
 								<h2 id="compatibility-title">Team compatibility influences</h2>
-								<p>Set how strongly each scoring capability should affect future FTC matching. FRC will be added later. Meow meow meow</p>
+								<p>Set how strongly each scoring capability should affect future FTC matching. These influences are shared by all accounts.</p>
 							</div>
 						</header>
 						{isLoadingWeights ? <p className="logs-status" aria-busy="true">Loading shared influences...</p> : <>
@@ -269,12 +329,12 @@ export default function SettingsPage() {
 					</section>
 					{isLoading && <p className="logs-status" aria-busy="true">Checking audit-log access...</p>}
 					{!isLoading && isAllowed === false && <section className="logs-denied" role="status">
-						<h2>Restricted audit logs</h2>
+						<h3>Debug log</h3>
 						<p>Compatibility settings are available to signed-in users. Audit logs and access management are limited to approved accounts.</p>
 					</section>}
 					{!isLoading && isAllowed && <>
 						{canManageWhitelist && <section className="logs-whitelist">
-							<h2>Manage access</h2>
+							<h3>Debug log access</h3>
 							<form onSubmit={(event) => void updateWhitelist(event)}>
 								<label>Account name<input maxLength={100} value={accountName} onChange={(event) => setAccountName(event.target.value)} placeholder="Full name" /></label>
 								<label>Email address<input type="email" maxLength={320} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" /></label>
@@ -286,7 +346,7 @@ export default function SettingsPage() {
 							</li>)}</ul> : <p>No additional accounts are whitelisted.</p>}
 						</section>}
 						<section className="logs-list" aria-labelledby="logs-title">
-							<h2 id="logs-title">Recent database edits</h2>
+							<h3 id="logs-title">Debug log</h3>
 							{logs.length ? <div className="logs-table-wrap"><table>
 								<thead><tr><th>Date and time</th><th>Account</th><th>Edit</th><th>Target</th></tr></thead>
 								<tbody>{logs.map((log) => <tr key={log.id}>
@@ -308,6 +368,7 @@ export default function SettingsPage() {
 							{hasMore && <button className="search-button logs-more" type="button" disabled={isLoading} onClick={() => void loadLogs(true)}>Load more logs</button>}
 						</section>
 					</>}
+					</section>
 				</div>
 			</main>
 		</Protected>

@@ -1,7 +1,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.team";
 import { cloudflareContext } from "../cloudflare-context";
-import { auditStatement, getAuditActor } from "../audit.server";
+import { auditStatement, getAuditActor, resolveAccountName, CONTRIBUTOR_EMAIL } from "../audit.server";
 
 type FtcEnv = Env & {
 	CLERK_SECRET_KEY?: string;
@@ -356,16 +356,19 @@ function formatDisplayName(firstName: string | null, lastInitial: string | null)
 
 async function getUserIdentity(env: FtcEnv, userId: string) {
 	const user = await createClerkClient({ secretKey: env.CLERK_SECRET_KEY }).users.getUser(userId);
-	const firstName = user.firstName?.trim();
-	const lastName = user.lastName?.trim();
-	if (!firstName || !lastName) throw new Error("Clerk first and last names are required.");
-	const lastInitial = user.lastName?.trim().charAt(0) || null;
-	const accountName = user.fullName?.trim() || `${firstName} ${lastName}`;
+	const email = user.primaryEmailAddress?.emailAddress?.trim().toLowerCase() || null;
+	const isContributor = email === CONTRIBUTOR_EMAIL;
+	const creditedName = await resolveAccountName(env, userId, email, user.fullName?.trim() || user.username?.trim() || "Unknown account");
+	const firstName = isContributor ? creditedName : user.firstName?.trim();
+	const lastName = isContributor ? "" : user.lastName?.trim();
+	if (!firstName || (!lastName && !isContributor)) throw new Error("Clerk first and last names are required.");
+	const lastInitial = isContributor ? null : lastName?.charAt(0) || null;
+	const accountName = creditedName;
 	return {
 		firstName: firstName.slice(0, 100),
 		lastInitial,
 		accountName: accountName.slice(0, 100),
-		email: user.primaryEmailAddress?.emailAddress?.trim().toLowerCase() || null,
+		email,
 	};
 }
 

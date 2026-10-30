@@ -6,7 +6,8 @@ import {
 	Scripts,
 	ScrollRestoration,
 } from "react-router";
-import { ClerkProvider } from "@clerk/react-router";
+import { ClerkProvider, useAuth } from "@clerk/react-router";
+import { useEffect } from "react";
 import { clerkMiddleware } from "@clerk/react-router/server";
 import { rootAuthLoader } from "@clerk/react-router/ssr.server";
 
@@ -30,6 +31,33 @@ export const links: Route.LinksFunction = () => [
 
 export async function loader(args: Route.LoaderArgs) {
 	return rootAuthLoader(args);
+}
+
+function AccountTheme() {
+	const { getToken, isLoaded, userId } = useAuth();
+
+	useEffect(() => {
+		let active = true;
+		delete document.documentElement.dataset.theme;
+		if (isLoaded && userId) {
+			void (async () => {
+				try {
+					const token = await getToken();
+					const response = await fetch("/api/settings?scope=personal", {
+						headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+					});
+					if (!response.ok) return;
+					const data = await response.json() as { personal?: { theme?: string } };
+					if (active) document.documentElement.dataset.theme = data.personal?.theme === "light" ? "light" : "dark";
+				} catch {
+					if (active) document.documentElement.dataset.theme = "dark";
+				}
+			})();
+		}
+		return () => { active = false; };
+	}, [getToken, isLoaded, userId]);
+
+	return null;
 }
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -57,6 +85,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
 			signInFallbackRedirectUrl="/home"
 			signUpFallbackRedirectUrl="/home"
 		>
+			<AccountTheme />
 			<Outlet />
 		</ClerkProvider>
 	);

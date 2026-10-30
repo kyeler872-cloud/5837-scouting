@@ -6,6 +6,28 @@ import { auditStatement, getAuditActor } from "../audit.server";
 type League = "FTC" | "FRC";
 type ApiObject = Record<string, unknown>;
 type EventTeam = { number: string; name: string; manual: boolean };
+type MatchPhase = "Auto" | "TeleOp" | "Endgame";
+type CompatibilityWeights = {
+	flowerCapability: number;
+	flowerTakeFrom: number;
+	flowerInputInto: number;
+	hiveCapability: number;
+	hivePosition: number;
+	hiveShooterType: number;
+};
+type EventMatch = {
+	matchKey: string;
+	qualificationNumber: number;
+	teams: string[];
+	redTeams: string[];
+	blueTeams: string[];
+	scheduledTime: string | null;
+	redScore: number | null;
+	blueScore: number | null;
+	completed: boolean;
+	prediction: { redScore: number | null; blueScore: number | null; redWinProbability: number | null };
+	notes: Partial<Record<MatchPhase, { value: string; displayName: string }>>;
+};
 type EventEnv = Env & {
 	CLERK_SECRET_KEY?: string;
 	FTC_API_AUTH?: string;
@@ -18,6 +40,15 @@ type EventEnv = Env & {
 const FTC_API_BASE = "https://ftc-api.firstinspires.org/v2.0";
 const TBA_API_BASE = "https://www.thebluealliance.com/api/v3";
 const NOTE_CATEGORIES = ["Matches", "Playoffs", "Notes"] as const;
+const MATCH_PHASES: MatchPhase[] = ["Auto", "TeleOp", "Endgame"];
+const DEFAULT_COMPATIBILITY_WEIGHTS: CompatibilityWeights = {
+	flowerCapability: 50,
+	flowerTakeFrom: 50,
+	flowerInputInto: 50,
+	hiveCapability: 50,
+	hivePosition: 50,
+	hiveShooterType: 50,
+};
 
 function json(data: unknown, status = 200) {
 	return new Response(JSON.stringify(data), {
@@ -83,6 +114,150 @@ function dbTeamNumber(league: League, number: string) {
 	return league === "FRC" ? `frc:${number}` : number;
 }
 
+function qualificationMatches(value: ApiObject[] | null, league: League): Omit<EventMatch, "notes">[] {
+	return (value || []).flatMap((match) => {
+		let qualificationNumber = 0;
+		let teams: string[] = [];
+		let redTeams: string[] = [];
+		let blueTeams: string[] = [];
+		let scheduledTime = "";
+		let redScore: number | null = null;
+		let blueScore: number | null = null;
+		if (league === "FTC") {
+			const level = stringField(match, ["tournamentLevel"]).toLowerCase();
+			if (level && !level.includes("qual")) return [];
+			qualificationNumber = Number(match.matchNumber);
+			const assignments = Array.isArray(match.teams) ? match.teams as ApiObject[] : [];
+			for (const assignment of assignments) {
+				const teamNumber = stringField(assignment, ["teamNumber"]);
+				const station = stringField(assignment, ["station"]).toLowerCase();
+				if (!teamNumber) continue;
+				teams.push(teamNumber);
+				if (station.startsWith("red")) redTeams.push(teamNumber);
+				if (station.startsWith("blue")) blueTeams.push(teamNumber);
+			}
+			scheduledTime = stringField(match, ["scheduledStartTime", "actualStartTime"]);
+			redScore = nonnegativeScore(match.scoreRedFinal);
+			blueScore = nonnegativeScore(match.scoreBlueFinal);
+		} else {
+			if (match.comp_level !== "qm") return [];
+			qualificationNumber = Number(match.match_number);
+			const alliances = typeof match.alliances === "object" && match.alliances !== null ? match.alliances as ApiObject : {};
+			for (const color of ["red", "blue"] as const) {
+				const alliance = typeof alliances[color] === "object" && alliances[color] !== null ? alliances[color] as ApiObject : {};
+			const allianceTeams = Array.isArray(alliance.team_keys) ? alliance.team_keys.map((team) => String(team).replace(/^frc/, "")) : [];
+			teams.push(...allianceTeams);
+			if (color === "red") redTeams = allianceTeams;
+			else blueTeams = allianceTeams;
+			if (color === "red") redScore = nonnegativeScore(alliance.score);
+			else blueScore = nonnegativeScore(alliance.score);
+			}
+			const rawTime = match.time ?? match.predicted_time;
+			if (typeof rawTime === "number") scheduledTime = new Date(rawTime * 1000).toISOString();
+			else if (typeof rawTime === "string") scheduledTime = rawTime;
+		}
+		if (!Number.isInteger(qualificationNumber) || qualificationNumber < 1) return [];
+		return [{
+			matchKey: `qual-${qualificationNumber}`,
+			qualificationNumber,
+			teams,
+			redTeams,
+			blueTeams,
+			scheduledTime: scheduledTime || null,
+			redScore,
+			blueScore,
+			completed: redScore !== null && blueScore !== null,
+			prediction: { redScore: null, blueScore: null, redWinProbability: null },
+		}];
+	}).sort((first, second) => first.qualificationNumber - second.qualificationNumber);
+}
+
+function nonnegativeScore(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function parseCompatibilityWeights(value: string | null): CompatibilityWeights {
+	if (!value) return DEFAULT_COMPATIBILITY_WEIGHTS;
+	try {
+		const parsed = JSON.parse(value) as Record<string, unknown>;
+		const values = Object.keys(DEFAULT_COMPATIBILITY_WEIGHTS).map((key) => parsed[key]);
+		if (values.some((weight) => typeof weight !== "number" || !Number.isFinite(weight) || weight < 0 || weight > 100)) {
+			return DEFAULT_COMPATIBILITY_WEIGHTS;
+		}
+		return parsed as CompatibilityWeights;
+	} catch {
+		return DEFAULT_COMPATIBILITY_WEIGHTS;
+	}
+}
+
+function robotCapabilityScore(value: string, weights: CompatibilityWeights): number | null {
+	try {
+		const capabilities = JSON.parse(value) as Record<string, unknown>;
+		if (typeof capabilities.flower !== "boolean" || typeof capabilities.hive !== "boolean") return null;
+		const flowerActions = Array.isArray(capabilities.flowerActions) ? capabilities.flowerActions : [];
+		const features: [keyof CompatibilityWeights, boolean][] = [
+			["flowerCapability", capabilities.flower],
+			["flowerTakeFrom", capabilities.flower && flowerActions.includes("Take from")],
+			["flowerInputInto", capabilities.flower && flowerActions.includes("Input into")],
+			["hiveCapability", capabilities.hive],
+			["hivePosition", capabilities.hive && typeof capabilities.hivePosition === "string"],
+			["hiveShooterType", capabilities.hive && typeof capabilities.hiveShooterType === "string"],
+		];
+		const totalWeight = features.reduce((sum, [key]) => sum + weights[key], 0);
+		if (totalWeight === 0) return 50;
+		return features.reduce((sum, [key, active]) => sum + (active ? weights[key] : 0), 0) / totalWeight * 100;
+	} catch {
+		return null;
+	}
+}
+
+function average(values: number[]) {
+	return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function buildMatchPredictions(
+	matches: Omit<EventMatch, "notes">[],
+	capabilitiesByTeam: Map<string, number>,
+	league: League,
+) {
+	const scoresByTeam = new Map<string, number[]>();
+	const scoreMargins: number[] = [];
+	const allScores: number[] = [];
+	for (const match of matches) {
+		if (!match.completed || match.redScore === null || match.blueScore === null) continue;
+		scoreMargins.push(match.redScore - match.blueScore);
+		allScores.push(match.redScore, match.blueScore);
+		for (const team of match.redTeams) scoresByTeam.set(team, [...(scoresByTeam.get(team) || []), match.redScore]);
+		for (const team of match.blueTeams) scoresByTeam.set(team, [...(scoresByTeam.get(team) || []), match.blueScore]);
+	}
+	const eventAverage = average(allScores);
+	const meanMargin = average(scoreMargins) || 0;
+	const marginDeviation = scoreMargins.length > 1
+		? Math.sqrt(average(scoreMargins.map((margin) => (margin - meanMargin) ** 2)) || 0)
+		: 0;
+	const scoreScale = Math.max(8, marginDeviation || (eventAverage || 60) * 0.18);
+	const capabilityAverage = (teams: string[]) => {
+		if (league !== "FTC") return 50;
+		return average(teams.map((team) => capabilitiesByTeam.get(team)).filter((score): score is number => score !== undefined)) ?? 50;
+	};
+	const allianceAverage = (teams: string[]) =>
+		average(teams.map((team) => average(scoresByTeam.get(team) || [])).filter((score): score is number => score !== null)) ?? eventAverage;
+
+	return matches.map((match) => {
+		const redScore = allianceAverage(match.redTeams);
+		const blueScore = allianceAverage(match.blueTeams);
+		let redWinProbability: number | null = null;
+		if (redScore !== null && blueScore !== null) {
+			const capabilityLogOdds = league === "FTC"
+				? (capabilityAverage(match.redTeams) - capabilityAverage(match.blueTeams)) / 100
+				: 0;
+			const scoreLogOdds = (redScore - blueScore) / scoreScale;
+			redWinProbability = 1 / (1 + Math.exp(-(scoreLogOdds + capabilityLogOdds)));
+		}
+		return { ...match, prediction: { redScore, blueScore, redWinProbability } };
+	});
+}
+
 export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const env = context.get(cloudflareContext).env as EventEnv;
 	if (!env.CLERK_SECRET_KEY) return json({ error: "Server authentication is not configured." }, 503);
@@ -99,6 +274,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	let event: ApiObject | null = null;
 	let teams: EventTeam[] = [];
 	let warning: string | null = null;
+	let scheduleData: ApiObject[] | null = null;
 	const custom = eventCode.startsWith("custom-");
 	if (custom) {
 		const leagueTeamPredicate = league === "FRC" ? "team_number LIKE 'frc:%'" : "team_number NOT LIKE 'frc:%'";
@@ -138,17 +314,22 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 				Authorization: authorization,
 			}),
 		]);
+		const scheduleResult = await fetchJson<ApiObject>(`${FTC_API_BASE}/${season}/schedule/${encodeURIComponent(eventCode)}/qual/hybrid`, {
+			Accept: "application/json",
+			Authorization: authorization,
+		});
+		scheduleData = records(scheduleResult.data, "schedule");
 		event = records(eventResult.data, "events")[0] || null;
 		teams = records(teamsResult.data, "teams").map((team) => ({
 			number: stringField(team, ["teamNumber"]),
 			name: stringField(team, ["nameShort", "nameLong", "name"]),
 			manual: false,
 		})).filter((team) => Boolean(team.number));
-		warning = [eventResult.warning, teamsResult.warning].filter(Boolean).join(" ") || null;
+		warning = [eventResult.warning, teamsResult.warning, scheduleResult.warning].filter(Boolean).join(" ") || null;
 		if (!event) return json({ error: warning || "Event not found in the FIRST API." }, warning ? 502 : 404);
 	} else {
 		if (!env.TBA_AUTH_KEY) return json({ error: "The Blue Alliance API key is not configured on the server." }, 503);
-		const [eventResult, teamsResult] = await Promise.all([
+		const [eventResult, teamsResult, scheduleResult] = await Promise.all([
 			fetchJson<ApiObject>(`${TBA_API_BASE}/event/${encodeURIComponent(eventCode)}`, {
 				Accept: "application/json",
 				"X-TBA-Auth-Key": env.TBA_AUTH_KEY,
@@ -157,25 +338,53 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 				Accept: "application/json",
 				"X-TBA-Auth-Key": env.TBA_AUTH_KEY,
 			}),
+			fetchJson<ApiObject[]>(`${TBA_API_BASE}/event/${encodeURIComponent(eventCode)}/matches`, {
+				Accept: "application/json",
+				"X-TBA-Auth-Key": env.TBA_AUTH_KEY,
+			}),
 		]);
 		event = eventResult.data;
+		scheduleData = scheduleResult.data;
 		teams = (teamsResult.data || []).map((team) => ({
 			number: stringField(team, ["team_number", "key"]).replace(/^frc/, ""),
 			name: stringField(team, ["nickname", "name"]),
 			manual: false,
 		})).filter((team) => Boolean(team.number));
-		warning = [eventResult.warning, teamsResult.warning].filter(Boolean).join(" ") || null;
+		warning = [eventResult.warning, teamsResult.warning, scheduleResult.warning].filter(Boolean).join(" ") || null;
 		if (!event) return json({ error: warning || "Event not found in The Blue Alliance." }, warning ? 502 : 404);
 	}
 
-	const [notes, assets, manualTeams] = await Promise.all([
+	const matches = custom ? [] : qualificationMatches(scheduleData, league);
+	const [notes, assets, manualTeams, matchNotes, compatibilityRow, robotRows] = await Promise.all([
 		env.SCOUTING_DB.prepare("SELECT category, note, updated_by_account_name FROM event_notes WHERE league = ? AND season = ? AND event_code = ?")
 			.bind(league, season, eventCode).all<{ category: string; note: string; updated_by_account_name: string }>(),
 		env.SCOUTING_DB.prepare("SELECT photos_url FROM event_assets WHERE league = ? AND season = ? AND event_code = ?")
 			.bind(league, season, eventCode).first<{ photos_url: string }>(),
 		env.SCOUTING_DB.prepare("SELECT team_number, team_name FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? ORDER BY team_number")
 			.bind(league, season, eventCode).all<{ team_number: string; team_name: string }>(),
+		env.SCOUTING_DB.prepare("SELECT match_key, phase, note, updated_by_account_name FROM event_match_scouting WHERE league = ? AND season = ? AND event_code = ?")
+			.bind(league, season, eventCode).all<{ match_key: string; phase: MatchPhase; note: string; updated_by_account_name: string }>(),
+		env.SCOUTING_DB.prepare("SELECT weights FROM compatibility_settings WHERE id = 'global'")
+			.first<{ weights: string }>(),
+		env.SCOUTING_DB.prepare("SELECT team_number, scoring_capabilities FROM robot_entries WHERE season = ? AND end_month IS NULL")
+			.bind(season).all<{ team_number: string; scoring_capabilities: string }>(),
 	]);
+	const compatibilityWeights = parseCompatibilityWeights(compatibilityRow?.weights || null);
+	const capabilityValues = new Map<string, number[]>();
+	for (const robot of robotRows.results) {
+		const teamNumber = robot.team_number.replace(/^frc:/, "");
+		if (!matches.some((match) => match.teams.includes(teamNumber))) continue;
+		const score = robotCapabilityScore(robot.scoring_capabilities, compatibilityWeights);
+		if (score !== null) capabilityValues.set(teamNumber, [...(capabilityValues.get(teamNumber) || []), score]);
+	}
+	const capabilitiesByTeam = new Map([...capabilityValues].map(([number, scores]) => [number, average(scores) || 0]));
+	const forecastMatches = buildMatchPredictions(matches, capabilitiesByTeam, league);
+	const notesByMatch = new Map<string, EventMatch["notes"]>();
+	for (const item of matchNotes.results) {
+		const notes = notesByMatch.get(item.match_key) || {};
+		notes[item.phase] = { value: item.note, displayName: item.updated_by_account_name };
+		notesByMatch.set(item.match_key, notes);
+	}
 	for (const team of manualTeams.results) {
 		const existing = teams.find((item) => item.number === team.team_number);
 		if (existing) {
@@ -200,6 +409,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 			custom,
 		},
 		teams: teams.sort((a, b) => Number(a.number) - Number(b.number)),
+		matches: forecastMatches.map((match) => ({ ...match, notes: notesByMatch.get(match.matchKey) || {} })),
 		notes: Object.fromEntries(notes.results.map((note) => [note.category, { value: note.note, displayName: note.updated_by_account_name }])),
 		photosUrl: assets?.photos_url || "",
 		warning,
@@ -219,7 +429,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if ((league !== "FTC" && league !== "FRC") || !/^\d{4}$/.test(season) || !/^[a-zA-Z0-9_-]{1,120}$/.test(eventCode)) {
 		return json({ error: "Invalid event." }, 400);
 	}
-	let body: { action?: unknown; category?: unknown; note?: unknown; photosUrl?: unknown; teamNumber?: unknown; teamName?: unknown };
+	let body: { action?: unknown; category?: unknown; note?: unknown; photosUrl?: unknown; teamNumber?: unknown; teamName?: unknown; matchKey?: unknown };
 	try {
 		body = await request.json() as typeof body;
 	} catch {
@@ -229,6 +439,24 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	try {
 		const actor = await getAuditActor(env, session.sub);
 		const displayName = actor.accountName;
+		if (body.action === "match-note") {
+			if (typeof body.matchKey !== "string" || !/^qual-\d{1,4}$/.test(body.matchKey)) return json({ error: "Choose a valid qualification." }, 400);
+			if (typeof body.category !== "string" || !MATCH_PHASES.includes(body.category as MatchPhase)) return json({ error: "Choose Auto, TeleOp, or Endgame." }, 400);
+			if (typeof body.note !== "string" || body.note.length > 10000) return json({ error: "Match notes must be 10,000 characters or fewer." }, 400);
+			const phase = body.category as MatchPhase;
+			const previous = await env.SCOUTING_DB.prepare(`SELECT note FROM event_match_scouting
+				WHERE league = ? AND season = ? AND event_code = ? AND match_key = ? AND phase = ?`)
+				.bind(league, season, eventCode, body.matchKey, phase).first<{ note: string }>();
+			const note = body.note.trim();
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`INSERT INTO event_match_scouting (league, season, event_code, match_key, phase, note, updated_by, updated_by_account_name, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+					ON CONFLICT(league, season, event_code, match_key, phase) DO UPDATE SET note = excluded.note, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
+					.bind(league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
+				auditStatement(env.SCOUTING_DB, actor, "Updated qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, previous?.note ?? null, note),
+			]);
+			return json({ matchKey: body.matchKey, phase, note: { value: note, displayName } });
+		}
 		if (body.action === "note") {
 			if (typeof body.category !== "string" || !NOTE_CATEGORIES.includes(body.category as typeof NOTE_CATEGORIES[number])) return json({ error: "Choose a valid note category." }, 400);
 			if (typeof body.note !== "string" || body.note.length > 10000) return json({ error: "Notes must be 10,000 characters or fewer." }, 400);

@@ -1,7 +1,8 @@
-import { UserButton, useAuth } from "@clerk/react-router";
+import { useAuth } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import type { Route } from "./+types/event-search";
 import { Protected } from "../protected";
+import { TopNavigation } from "../components/top-navigation";
 
 type League = "FTC" | "FRC";
 type EventSummary = {
@@ -37,6 +38,10 @@ function displayDate(start: string | null, end: string | null) {
 	return end && end !== start ? `${format(start)} – ${format(end)}` : format(start);
 }
 
+function displayRegion(region: string) {
+	return region === "USIA" ? "Iowa" : region;
+}
+
 export function meta({}: Route.MetaArgs) {
 	return [{ title: "Search Events | Scout 5837" }, { name: "description", content: "Search FTC and FRC robotics events." }];
 }
@@ -45,7 +50,7 @@ export default function EventSearchPage() {
 	const { getToken } = useAuth();
 	const [league, setLeague] = useState<League>("FTC");
 	const [season, setSeason] = useState("2026");
-	const [region, setRegion] = useState("Iowa");
+	const [region, setRegion] = useState("USIA");
 	const [regions, setRegions] = useState<string[]>([]);
 	const [events, setEvents] = useState<EventSummary[]>([]);
 	const [error, setError] = useState("");
@@ -55,7 +60,7 @@ export default function EventSearchPage() {
 
 	useEffect(() => {
 		setSeason((current) => (league === "FTC" ? ftcSeasons : frcSeasons).includes(Number(current) ? current : "2026"));
-		setRegion("Iowa");
+		setRegion("USIA");
 		setEvents([]);
 		setRegions([]);
 		setSearched(false);
@@ -76,9 +81,12 @@ export default function EventSearchPage() {
 				if (!cancelled) {
 					const availableRegions = data.regions || [];
 					setRegions(availableRegions);
+					const defaultRegion = availableRegions.includes("USIA")
+						? "USIA"
+						: availableRegions.find((item) => item.toLowerCase().includes("iowa") || item.toUpperCase() === "IA") || "Iowa";
 					setRegion((current) => availableRegions.includes(current)
 						? current
-						: availableRegions.find((item) => item.toLowerCase().includes("iowa") || item.toUpperCase() === "IA") || "Iowa");
+						: defaultRegion);
 				}
 			} catch (regionError) {
 				if (!cancelled) setError(regionError instanceof Error ? regionError.message : "Could not load event regions.");
@@ -117,16 +125,7 @@ export default function EventSearchPage() {
 	return (
 		<Protected>
 			<main className="home-shell">
-				<nav className="topbar" aria-label="Main navigation">
-					<a className="brand" href="/home"><span>Scout 5837</span></a>
-					<div className="topbar-tabs" aria-label="Search mode">
-						<a href="/home">Team search</a>
-						<a href="/compare">Compare</a>
-						<a href="/events" aria-current="page">Event search</a>
-						<a href="/settings">Settings</a>
-					</div>
-					<UserButton />
-				</nav>
+				<TopNavigation currentPage="events" />
 				<section className="scouting-search" aria-labelledby="event-search-title">
 					<p className="section-kicker">FIRST Robotics Scouting</p>
 					<h1 id="event-search-title">search for an event!</h1>
@@ -135,7 +134,7 @@ export default function EventSearchPage() {
 						<div className="search-options event-search-options">
 							<div><label htmlFor="event-league">Program</label><select id="event-league" value={league} onChange={(event) => setLeague(event.target.value as League)}><option value="FTC">FTC</option><option value="FRC">FRC</option></select></div>
 							<div><label htmlFor="event-season">Season</label><select id="event-season" value={season} onChange={(event) => setSeason(event.target.value)}>{(league === "FTC" ? ftcSeasons : frcSeasons).map((year) => <option key={year} value={year}>{year}-{String(year + 1).slice(-2)}</option>)}</select></div>
-							<div><label htmlFor="event-region">Region</label><select id="event-region" value={region} onChange={(event) => setRegion(event.target.value)}><option value="">All regions</option>{region && !regions.includes(region) && <option value={region}>{region}</option>}{regions.map((item) => <option key={item} value={item}>{item}</option>)}</select></div>
+							<div><label htmlFor="event-region">Region</label><select id="event-region" value={region} onChange={(event) => setRegion(event.target.value)}><option value="">All regions</option>{region && !regions.includes(region) && <option value={region}>{displayRegion(region)}</option>}{regions.map((item) => <option key={item} value={item}>{displayRegion(item)}</option>)}</select></div>
 						</div>
 						<div className="search-row"><button className="search-button" type="submit" disabled={loading}>{loading ? "Searching..." : "Search events"}</button></div>
 					</form>
@@ -148,7 +147,7 @@ export default function EventSearchPage() {
 						{events.length ? <div className="event-card-grid">{events.map((event) => {
 							const query = new URLSearchParams({ league, season });
 							return <a className="event-search-card" href={`/events/${league}/${season}/${encodeURIComponent(event.code)}?${query}`} key={event.code}>
-								<p className="event-card-meta">{event.region || "Region unavailable"}{event.custom && <span>Custom</span>}</p>
+								<p className="event-card-meta">{event.region ? displayRegion(event.region) : "Region unavailable"}{event.custom && <span>Custom</span>}</p>
 								<h3>{event.name}</h3>
 								<p>{displayDate(event.startDate, event.endDate)}</p>
 								{(event.city || event.state || event.country) && <p>{[event.city, event.state, event.country].filter(Boolean).join(", ")}</p>}
