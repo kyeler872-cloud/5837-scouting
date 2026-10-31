@@ -1,7 +1,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.team";
 import { cloudflareContext } from "../cloudflare-context";
-import { auditStatement, getAuditActor, resolveAccountName, CONTRIBUTOR_EMAIL } from "../audit.server";
+import { auditStatement, getAuditActor, getLocalContributorName, resolveAccountName, CONTRIBUTOR_EMAIL } from "../audit.server";
 
 type FtcEnv = Env & {
 	CLERK_SECRET_KEY?: string;
@@ -354,11 +354,11 @@ function formatDisplayName(firstName: string | null, lastInitial: string | null)
 	return "Account name unavailable";
 }
 
-async function getUserIdentity(env: FtcEnv, userId: string) {
+async function getUserIdentity(env: FtcEnv, userId: string, contributorName: string | null) {
 	const user = await createClerkClient({ secretKey: env.CLERK_SECRET_KEY }).users.getUser(userId);
 	const email = user.primaryEmailAddress?.emailAddress?.trim().toLowerCase() || null;
 	const isContributor = email === CONTRIBUTOR_EMAIL;
-	const creditedName = await resolveAccountName(env, userId, email, user.fullName?.trim() || user.username?.trim() || "Unknown account");
+	const creditedName = resolveAccountName(email, user.fullName?.trim() || user.username?.trim() || "Unknown account", contributorName, true);
 	const firstName = isContributor ? creditedName : user.firstName?.trim();
 	const lastName = isContributor ? "" : user.lastName?.trim();
 	if (!firstName || (!lastName && !isContributor)) throw new Error("Clerk first and last names are required.");
@@ -729,7 +729,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		}
 
 		try {
-			const actor = await getAuditActor(env, session.sub);
+			const actor = await getAuditActor(env, session.sub, getLocalContributorName(request), true);
 			const previousLinks = await getSocialLinks(env.SCOUTING_DB, league, dbTeamNumber);
 			await env.SCOUTING_DB.batch([...SOCIAL_PLATFORMS.map((platform) => {
 				const value = socialLinks[platform];
@@ -750,7 +750,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 
 	if (body.field === "eventSelection") {
 		if (typeof body.eventCode !== "string" || typeof body.eventName !== "string" || typeof body.selected !== "boolean") return json({ error: "Invalid event selection." }, 400);
-		const identity = await getUserIdentity(env, session.sub);
+		const identity = await getUserIdentity(env, session.sub, getLocalContributorName(request));
 		const previous = await env.SCOUTING_DB.prepare("SELECT event_name FROM selected_events WHERE team_number = ? AND season = ? AND event_code = ?")
 			.bind(dbTeamNumber, season, body.eventCode).first<{ event_name: string }>();
 		const edit = body.selected
@@ -774,7 +774,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		if (typeof body.eventName !== "string" || !body.eventName.trim() || body.eventName.length > 200) {
 			return json({ error: "Enter an event name." }, 400);
 		}
-		const identity = await getUserIdentity(env, session.sub);
+		const identity = await getUserIdentity(env, session.sub, getLocalContributorName(request));
 		const eventCode = `custom-${crypto.randomUUID()}`;
 		if (body.eventDate !== undefined && (typeof body.eventDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(body.eventDate))) return json({ error: "Enter a valid event date." }, 400);
 		try {
@@ -806,7 +806,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 				const previousAutos = parseRobotAutos(existing.autos);
 				const nextAutos = previousAutos.filter((auto) => auto.id !== autoId);
 				if (nextAutos.length === previousAutos.length) return json({ error: "Autonomous path not found." }, 404);
-				const identity = await getUserIdentity(env, session.sub);
+				const identity = await getUserIdentity(env, session.sub, getLocalContributorName(request));
 				await env.SCOUTING_DB.batch([
 					env.SCOUTING_DB.prepare("UPDATE robot_entries SET autos = ? WHERE id = ? AND team_number = ? AND season = ?")
 						.bind(JSON.stringify(nextAutos), body.robotId, dbTeamNumber, season),
@@ -840,7 +840,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			}
 			const savedAuto: RobotAuto = { ...auto, name: autoName };
 			const nextAutos = [...previousAutos.filter((item) => item.id !== savedAuto.id), savedAuto];
-			const identity = await getUserIdentity(env, session.sub);
+			const identity = await getUserIdentity(env, session.sub, getLocalContributorName(request));
 			await env.SCOUTING_DB.batch([
 				env.SCOUTING_DB.prepare("UPDATE robot_entries SET autos = ? WHERE id = ? AND team_number = ? AND season = ?")
 					.bind(JSON.stringify(nextAutos), body.robotId, dbTeamNumber, season),
@@ -882,7 +882,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		if (new Set(submittedImages.map((image) => image.id)).size !== submittedImages.length) return json({ error: "Robot photos must have unique IDs." }, 400);
 
 		try {
-			const identity = await getUserIdentity(env, session.sub);
+			const identity = await getUserIdentity(env, session.sub, getLocalContributorName(request));
 			if (typeof body.robotId === "string") {
 				const existing = await env.SCOUTING_DB.prepare("SELECT name, description, image_urls, start_month, end_month, scoring_capabilities FROM robot_entries WHERE id = ? AND team_number = ? AND season = ?")
 					.bind(body.robotId, dbTeamNumber, season)
@@ -945,7 +945,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if (typeof body.field !== "string" || !EDITABLE_FIELDS.has(body.field) || typeof body.value !== "string" || body.value.length > 500) {
 		return json({ error: "Invalid editable field or value." }, 400);
 	}
-	const identity = await getUserIdentity(env, session.sub);
+	const identity = await getUserIdentity(env, session.sub, getLocalContributorName(request));
 
 	try {
 		const previous = await env.SCOUTING_DB.prepare("SELECT value FROM team_overrides WHERE team_number = ? AND season = ? AND field = ?")

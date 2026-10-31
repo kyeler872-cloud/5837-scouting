@@ -5,11 +5,13 @@ import {
 	Outlet,
 	Scripts,
 	ScrollRestoration,
+	useLocation,
 } from "react-router";
 import { ClerkProvider, useAuth } from "@clerk/react-router";
 import { useEffect } from "react";
 import { clerkMiddleware } from "@clerk/react-router/server";
 import { rootAuthLoader } from "@clerk/react-router/ssr.server";
+import { trackRecentPage } from "./recent-pages.client";
 
 import type { Route } from "./+types/root";
 import "./app.css";
@@ -60,6 +62,16 @@ function AccountTheme() {
 	return null;
 }
 
+function RecentPageTracker() {
+	const location = useLocation();
+
+	useEffect(() => {
+		trackRecentPage(`${location.pathname}${location.search}`);
+	}, [location.pathname, location.search]);
+
+	return null;
+}
+
 export function Layout({ children }: { children: React.ReactNode }) {
 	return (
 		<html lang="en">
@@ -86,6 +98,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
 			signUpFallbackRedirectUrl="/home"
 		>
 			<AccountTheme />
+			<RecentPageTracker />
 			<Outlet />
 		</ClerkProvider>
 	);

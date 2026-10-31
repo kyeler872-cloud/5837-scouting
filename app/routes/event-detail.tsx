@@ -4,17 +4,34 @@ import { useLocation, useParams } from "react-router";
 import type { Route } from "./+types/event-detail";
 import { Protected } from "../protected";
 import { TopNavigation } from "../components/top-navigation";
+import { trackRecentPage } from "../recent-pages.client";
+import { AutoPathField, type AutoPath } from "../components/auto-path-field";
+import field2026Image from "./Biobuzzfield.png";
+import field2025Image from "./FTC2025field.png";
 
 type League = "FTC" | "FRC";
 type EventTeam = { number: string; name: string; manual: boolean };
 type MatchPhase = "Auto" | "TeleOp" | "Endgame";
 type MatchNote = { value: string; displayName: string };
+type EventAuto = { id: string; name: string; alliance: "red" | "blue"; score: number | null; path: AutoPath };
+type MatchAutoSelection = {
+	teamNumber: string;
+	robotId: string;
+	autoId: string;
+	autoName: string;
+	path: AutoPath;
+	displayName: string;
+};
+type MatchAutoDraft = { teamNumber: string; type: "new" | "existing"; autoId: string; path: AutoPath };
+const EMPTY_AUTO_PATH: AutoPath = { points: [], controls: [] };
 type EventMatch = {
 	matchKey: string;
 	qualificationNumber: number;
 	teams: string[];
 	scheduledTime: string | null;
 	notes: Partial<Record<MatchPhase, MatchNote>>;
+	autoPath: { path: AutoPath; displayName: string } | null;
+	autoSelections: MatchAutoSelection[];
 };
 type EventData = {
 	league: League;
@@ -22,6 +39,7 @@ type EventData = {
 	eventCode: string;
 	event: { name: string; startDate: string | null; endDate: string | null; city: string; state: string; country: string; region: string; custom: boolean };
 	teams: EventTeam[];
+	activeRobots: Record<string, { id: string; name: string; autos: EventAuto[] }>;
 	matches: EventMatch[];
 	notes: Record<string, { value: string; displayName: string }>;
 	photosUrl: string;
@@ -66,6 +84,16 @@ function matchTimeLabel(value: string | null) {
 	return Number.isNaN(time.getTime()) ? value : time.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+function initialAutoDraft(match: EventMatch): MatchAutoDraft {
+	const selected = match.autoSelections[0];
+	return {
+		teamNumber: selected?.teamNumber || "",
+		type: selected ? "existing" : "new",
+		autoId: selected?.autoId || "",
+		path: selected?.path || EMPTY_AUTO_PATH,
+	};
+}
+
 export function meta({}: Route.MetaArgs) {
 	return [{ title: "Event | Scout 5837" }, { name: "description", content: "Event details, team roster, and scouting notes." }];
 }
@@ -83,6 +111,7 @@ export default function EventDetailPage() {
 	const [teamNumber, setTeamNumber] = useState("");
 	const [teamName, setTeamName] = useState("");
 	const [matchDrafts, setMatchDrafts] = useState<Record<string, Partial<Record<MatchPhase, string>>>>({});
+	const [matchAutoDrafts, setMatchAutoDrafts] = useState<Record<string, MatchAutoDraft>>({});
 	const [editingMatchKey, setEditingMatchKey] = useState<string | null>(null);
 	const [error, setError] = useState("");
 	const [teamHighlightError, setTeamHighlightError] = useState("");
@@ -129,6 +158,7 @@ export default function EventDetailPage() {
 						match.matchKey,
 						Object.fromEntries(matchPhases.map((phase) => [phase, match.notes[phase]?.value || ""])),
 					])));
+					setMatchAutoDrafts(Object.fromEntries(loaded.matches.map((match) => [match.matchKey, initialAutoDraft(match)])));
 				}
 				try {
 					const settingsResponse = await fetch("/api/settings?scope=personal", {
@@ -171,6 +201,16 @@ export default function EventDetailPage() {
 	useEffect(() => {
 		setDraft(eventData?.notes[category]?.value || "");
 	}, [category, eventData]);
+
+	useEffect(() => {
+		if (!eventData) return;
+		const selectedMatch = eventData.matches.find((match) => match.matchKey === selectedMatchKey);
+		trackRecentPage(
+			`${location.pathname}${location.search}`,
+			eventData.event.name,
+			`${league} ${season} · ${eventCode}${selectedMatch ? ` · Qualification ${selectedMatch.qualificationNumber}` : ""}`,
+		);
+	}, [eventData, eventCode, league, location.pathname, location.search, season, selectedMatchKey]);
 
 	useEffect(() => {
 		if (!eventData || !selectedMatchKey || lastScrolledMatchKey.current === selectedMatchKey) return;
@@ -223,7 +263,13 @@ export default function EventDetailPage() {
 		});
 		const data = await readResponse<EventData | { error?: string }>(response);
 		if (!response.ok) throw new Error("error" in data ? data.error || "Could not reload event." : "Could not reload event.");
-		setEventData(data as EventData);
+		const loaded = data as EventData;
+		setEventData(loaded);
+		setMatchDrafts(Object.fromEntries(loaded.matches.map((match) => [
+			match.matchKey,
+			Object.fromEntries(matchPhases.map((phase) => [phase, match.notes[phase]?.value || ""])),
+		])));
+		setMatchAutoDrafts(Object.fromEntries(loaded.matches.map((match) => [match.matchKey, initialAutoDraft(match)])));
 	}
 
 	async function editPhotosLink() {
@@ -318,23 +364,50 @@ export default function EventDetailPage() {
 								<summary>
 									<header className="event-qualifications-heading">
 										<div><p className="section-kicker">Match scouting</p><h2 id="event-qualifications-heading">Qualification matches</h2></div>
-										<p>Save Auto, TeleOp, and Endgame notes by match.</p>
+										<p>Map FTC autonomous paths and save all edited match fields together.</p>
 									</header>
 								</summary>
 								<button className="event-match-filter" type="button" aria-pressed={showAllMatches} onClick={() => setShowAllMatches((showingAll) => !showingAll)}>
 									{showAllMatches ? "Show only my matches" : "Show all matches"}
 								</button>
 								{displayedMatches.length ? <div className="event-qualification-list">{displayedMatches.map((match) => {
-								const hasNotes = matchPhases.some((phase) => Boolean(match.notes[phase]?.value.trim()));
+								const hasNotes = matchPhases.some((phase) => Boolean(match.notes[phase]?.value.trim())) || Boolean(match.autoPath) || match.autoSelections.length > 0;
 								const isEditing = editingMatchKey === match.matchKey;
 								const featuresAccountTeam = match.teams.some((number) => highlightedTeamNumbers.includes(number));
+								const autoDraft = matchAutoDrafts[match.matchKey] || initialAutoDraft(match);
+								const canMapAuto = league === "FTC" && (season === "2025" || season === "2026");
+								const mapSeason = season;
+								const autoFieldProps = {
+									fieldImage: mapSeason === "2025" ? field2025Image : field2026Image,
+									seasonLabel: mapSeason === "2025" ? "2025–26" : "2026–27",
+								};
+								const selectedRobot = autoDraft.teamNumber ? eventData.activeRobots[autoDraft.teamNumber] : undefined;
+								const selectedExistingAuto = selectedRobot?.autos.find((auto) => auto.id === autoDraft.autoId);
+								const savedTeamSelection = match.autoSelections.find((selection) => selection.teamNumber === autoDraft.teamNumber);
+								const changedPhases = matchPhases.filter((phase) =>
+									(matchDrafts[match.matchKey]?.[phase] ?? match.notes[phase]?.value ?? "").trim() !== (match.notes[phase]?.value || ""),
+								);
+								const autoMappingChanged = canMapAuto && Boolean(autoDraft.teamNumber) && (
+									autoDraft.type === "new"
+										? autoDraft.path.points.length >= 2
+										: Boolean(selectedExistingAuto) && savedTeamSelection?.autoId !== autoDraft.autoId
+								);
+								const hasUnsavedChanges = changedPhases.length > 0 || autoMappingChanged;
 								return <details className="event-qualification" id={`qualification-${match.matchKey}`} key={match.matchKey} open={selectedMatchKey ? match.matchKey === selectedMatchKey : false}>
 								<summary><strong className={featuresAccountTeam ? "event-qualification-featured" : undefined}>Qualification {match.qualificationNumber}</strong>{hasNotes && <span className="event-qualification-note-indicator" role="img" aria-label="Notes saved" title="Notes saved"><NotesIcon /></span>}<time>{matchTimeLabel(match.scheduledTime)}</time><span>{match.teams.length ? `${match.teams.length} teams` : "Teams unavailable"}</span></summary>
 								<div className="event-qualification-content">
 									{match.teams.length > 0 && <div className="event-qualification-teams" aria-label="Teams in this qualification">
 										{match.teams.map((number) => <a key={number} href={searchTeamUrl(league, season, number)}>{number}</a>)}
 									</div>}
-									<header className="event-qualification-notes-heading"><h3>Scouting notes</h3><button className="event-qualification-edit" type="button" aria-expanded={isEditing} onClick={() => setEditingMatchKey(isEditing ? null : match.matchKey)}>{isEditing ? "Done" : <><PencilIcon />Edit notes</>}</button></header>
+									<header className="event-qualification-notes-heading"><h3>Scouting notes</h3><button className="event-qualification-edit" type="button" aria-expanded={isEditing} onClick={() => {
+										if (isEditing) {
+											setMatchDrafts((current) => ({ ...current, [match.matchKey]: Object.fromEntries(matchPhases.map((phase) => [phase, match.notes[phase]?.value || ""])) }));
+											setMatchAutoDrafts((current) => ({ ...current, [match.matchKey]: initialAutoDraft(match) }));
+											setEditingMatchKey(null);
+										} else {
+											setEditingMatchKey(match.matchKey);
+										}
+									}}>{isEditing ? "Cancel edits" : <><PencilIcon />Edit notes</>}</button></header>
 									{isEditing ? <div className="event-match-phases">{matchPhases.map((phase) => {
 										const savedNote = match.notes[phase];
 										const value = matchDrafts[match.matchKey]?.[phase] ?? savedNote?.value ?? "";
@@ -343,19 +416,93 @@ export default function EventDetailPage() {
 												...current,
 												[match.matchKey]: { ...current[match.matchKey], [phase]: event.target.value },
 											}))} placeholder={`Record ${phase} notes...`} /></label>
-										<div className="event-match-phase-actions"><button className="search-button" type="button" disabled={saving} onClick={async () => {
-											try {
-												await save({ action: "match-note", matchKey: match.matchKey, category: phase, note: value });
-												setEditingMatchKey(null);
-											} catch {
-												// Keep the editor open so the note can be corrected and retried.
-											}
-										}}>{saving ? "Saving..." : `Save ${phase}`}</button><span>{savedNote?.displayName || "No saved notes"}</span></div>
+											<div className="event-match-phase-actions"><span>{savedNote?.displayName ? `Last saved by ${savedNote.displayName}` : "No saved notes"}</span></div>
 										</section>;
-									})}</div> : <div className="event-match-saved-phases">{matchPhases.map((phase) => {
+									})}
+									</div> : <div className="event-match-saved-phases">{matchPhases.map((phase) => {
 										const savedNote = match.notes[phase];
 										return <section key={phase}><h4>{phase}</h4>{savedNote?.value ? <div className="event-match-saved-note">{renderLinkedTeamNumbers(savedNote.value, league, season)}</div> : <p>No notes yet</p>}{savedNote?.displayName && <small>{savedNote.displayName}</small>}</section>;
 									})}</div>}
+									{canMapAuto && <section className="event-match-auto-map">
+										<h4>Qualification autos</h4>
+										{isEditing ? <>
+											<label className="event-auto-team-select"><span>Team</span><select required value={autoDraft.teamNumber} onChange={(event) => {
+												const nextTeam = event.target.value;
+												const selection = match.autoSelections.find((item) => item.teamNumber === nextTeam);
+												setMatchAutoDrafts((current) => ({
+													...current,
+													[match.matchKey]: {
+														teamNumber: nextTeam,
+														type: selection ? "existing" : "new",
+														autoId: selection?.autoId || "",
+														path: selection?.path || EMPTY_AUTO_PATH,
+													},
+												}));
+											}}>
+												<option value="">Select a team in this match</option>
+												{match.teams.map((number) => <option value={number} key={number}>{number}</option>)}
+											</select></label>
+											{autoDraft.teamNumber && <>
+												<label className="event-auto-team-select"><span>Routine</span><select value={autoDraft.type} onChange={(event) => setMatchAutoDrafts((current) => ({
+													...current,
+													[match.matchKey]: { ...autoDraft, type: event.target.value === "existing" ? "existing" : "new", autoId: "" },
+												}))}>
+													<option value="new">Map a new auto</option>
+													<option value="existing" disabled={!selectedRobot?.autos.length}>Select an existing auto</option>
+												</select></label>
+												{autoDraft.type === "existing" ? <>
+													{selectedRobot?.autos.length ? <>
+														<label className="event-auto-team-select"><span>Saved auto on {selectedRobot.name || "active robot"}</span><select required value={autoDraft.autoId} onChange={(event) => setMatchAutoDrafts((current) => ({
+															...current,
+															[match.matchKey]: { ...autoDraft, autoId: event.target.value },
+														}))}>
+															<option value="">Select an auto</option>
+															{selectedRobot.autos.map((auto) => <option key={auto.id} value={auto.id}>{auto.name || "Unnamed auto"} ({auto.alliance})</option>)}
+														</select></label>
+														{selectedExistingAuto && <><AutoPathField key={mapSeason} path={selectedExistingAuto.path} {...autoFieldProps} /><small>Existing auto; selecting it will not change its saved path.</small></>}
+													</> : <p>No saved autos are available. Choose “Map a new auto” to create one.</p>}
+												</> : <>
+													{!selectedRobot && <p>This team has no active robot; an unnamed robot will be created when this auto is saved.</p>}
+													<AutoPathField key={mapSeason} path={autoDraft.path} editable {...autoFieldProps} onChange={(path) => setMatchAutoDrafts((current) => ({ ...current, [match.matchKey]: { ...autoDraft, path } }))} />
+													<p>The mapped path will be added as an unnamed auto to this team’s active robot.</p>
+												</>}
+											</>}
+										</> : <>
+											{match.autoSelections.length > 0 ? match.autoSelections.map((selection) => <section className="event-match-saved-auto" key={selection.teamNumber}>
+												<h5>Team {selection.teamNumber}: {selection.autoName || "Unnamed auto"}</h5>
+												<AutoPathField key={mapSeason} path={selection.path} {...autoFieldProps} />
+												<small>Recorded by {selection.displayName}</small>
+											</section>) : match.autoPath
+												? <><AutoPathField key={mapSeason} path={match.autoPath.path} {...autoFieldProps} /><small>Legacy path mapped by {match.autoPath.displayName}; select a team to associate an auto.</small></>
+												: <p>No team autos recorded for this qualification.</p>}
+										</>}
+									</section>}
+									{isEditing && <div className="event-match-save-actions">
+										<button className="search-button" type="button" disabled={saving || !hasUnsavedChanges} onClick={async () => {
+											const notes = Object.fromEntries(changedPhases.map((phase) => [
+												phase,
+												(matchDrafts[match.matchKey]?.[phase] ?? match.notes[phase]?.value ?? "").trim(),
+											]));
+											try {
+												await save({
+													action: "match-scouting",
+													matchKey: match.matchKey,
+													...(changedPhases.length ? { notes } : {}),
+													...(autoMappingChanged ? {
+														autoMapping: {
+															teamNumber: autoDraft.teamNumber,
+															type: autoDraft.type,
+															...(autoDraft.type === "existing" ? { autoId: autoDraft.autoId } : { path: autoDraft.path }),
+														},
+													} : {}),
+												});
+												setEditingMatchKey(null);
+											} catch {
+												// Keep the editor open so the changes can be corrected and retried.
+											}
+										}}>{saving ? "Saving..." : "Save all changes"}</button>
+										<span>{hasUnsavedChanges ? `${changedPhases.length + Number(autoMappingChanged)} changed field${changedPhases.length + Number(autoMappingChanged) === 1 ? "" : "s"}` : "No changes to save"}</span>
+									</div>}
 								</div>
 								</details>;
 								})}</div> : <p className="empty-event-results">{eventData.matches.length ? "No qualification matches featuring your account teams are available." : "No qualification matches are available for this event."}</p>}

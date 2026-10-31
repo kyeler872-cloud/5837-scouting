@@ -522,6 +522,7 @@ html[data-theme="light"] .settings-saved {
 .dashboard-score-tile, .dashboard-frc-profile-tile { border-top-color: var(--blue-300); background: linear-gradient(145deg, color-mix(in srgb, var(--navy-900) 83%, var(--blue-600)), var(--navy-900) 70%); }
 .dashboard-matches-tile { border-top-color: #ffbd69; background: linear-gradient(145deg, color-mix(in srgb, var(--navy-900) 82%, #ffbd69), var(--navy-900) 72%); }
 .dashboard-shortcuts-tile { border-top-color: #8293ac; }
+.dashboard-recent-tile { grid-column: 1 / -1; border-top-color: #51a9c6; }
 .dashboard-frc-profile-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
 .dashboard-frc-profile-content > div > strong { display: block; margin-bottom: 0.35rem; color: var(--blue-300); font-size: 0.7rem; font-weight: 850; letter-spacing: 0.07em; text-transform: uppercase; }
 .dashboard-frc-profile-content > div > p { margin: 0.35rem 0 0.9rem; color: var(--muted); font-size: 0.78rem; line-height: 1.5; }
@@ -541,7 +542,14 @@ html[data-theme="light"] .settings-saved {
 .dashboard-tile-heading > a, .dashboard-add-shortcut { display: grid; flex: none; width: 2.2rem; height: 2.2rem; place-items: center; border: 1px solid var(--line); background: transparent; color: var(--blue-300); font-size: 1.2rem; text-decoration: none; }
 .dashboard-tile-heading > a:hover, .dashboard-add-shortcut:hover { border-color: var(--blue-600); background: color-mix(in srgb, var(--blue-600) 12%, transparent); }
 .dashboard-event-list, .dashboard-match-list, .dashboard-shortcut-list { display: grid; gap: 0.4rem; margin: 0; padding: 0; list-style: none; }
+.dashboard-recent-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 1fr)); gap: 0.6rem; margin: 0; padding: 0; list-style: none; }
 .dashboard-event-list li, .dashboard-match-list li, .dashboard-shortcut-list li { border-top: 1px solid var(--line); }
+.dashboard-recent-list li { min-width: 0; aspect-ratio: 1; border: 1px solid var(--line); background: #07142666; }
+.dashboard-recent-list a { display: flex; height: 100%; box-sizing: border-box; flex-direction: column; justify-content: space-between; gap: 0.55rem; overflow: hidden; color: var(--white); padding: 0.8rem; text-decoration: none; }
+.dashboard-recent-list a strong { display: -webkit-box; overflow: hidden; font-size: 0.88rem; font-weight: 800; line-height: 1.3; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.dashboard-recent-list a span { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 0.68rem; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.dashboard-recent-list a:hover { color: var(--blue-300); }
+.dashboard-recent-list small { color: var(--muted); font-size: 0.64rem; }
 .dashboard-event-list a { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 3.4rem; color: var(--white); text-decoration: none; }
 .dashboard-event-list a:hover strong, .dashboard-shortcut-list a:hover span { color: var(--blue-300); }
 .dashboard-event-list a > span { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
@@ -676,8 +684,22 @@ html[data-theme="light"] .settings-saved {
 .event-match-saved-phases small { display: block; margin-top: 0.5rem; color: var(--muted); font-size: 0.63rem; }
 .event-note-team-link { border-radius: 0.15rem; background: color-mix(in srgb, var(--blue-600) 16%, transparent); padding: 0 0.2rem; color: var(--blue-300); font-weight: 800; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .event-match-phase-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
-.event-match-phase-actions .search-button { min-height: 2.4rem; padding: 0 0.75rem; font-size: 0.72rem; }
 .event-match-phase-actions > span { color: var(--muted); font-size: 0.65rem; }
+.event-match-auto-map { display: grid; justify-items: start; gap: 0.55rem; }
+.event-match-auto-map h4 { margin: 0; color: var(--blue-300); font-size: 0.72rem; text-transform: uppercase; }
+.event-match-auto-map > .auto-path-field { width: min(100%, 34rem); }
+.event-match-auto-map > small { color: var(--muted); font-size: 0.65rem; }
+.event-match-auto-map > p { margin: 0; color: var(--muted); font-size: 0.76rem; }
+.event-auto-team-select { display: grid; gap: 0.4rem; width: min(100%, 22rem); color: var(--blue-300); font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
+.event-auto-team-select select { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--navy-900); padding: 0.65rem; color: var(--white); font: inherit; text-transform: none; }
+.event-auto-team-select select:focus { outline: 2px solid var(--blue-600); outline-offset: 1px; }
+.event-match-saved-auto { display: grid; justify-items: start; gap: 0.4rem; width: 100%; }
+.event-match-saved-auto h5 { margin: 0; color: var(--white); font-size: 0.8rem; }
+.event-match-saved-auto > .auto-path-field { width: min(100%, 34rem); }
+.event-match-saved-auto > small { color: var(--muted); font-size: 0.65rem; }
+.event-match-save-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.7rem; }
+.event-match-save-actions .search-button { min-height: 2.6rem; padding: 0 0.9rem; font-size: 0.75rem; }
+.event-match-save-actions > span { color: var(--muted); font-size: 0.68rem; }
 .event-roster h2, .event-notes h2 { display: flex; align-items: center; gap: 0.65rem; margin: 0 0 1rem; font-size: clamp(1.6rem, 3vw, 2.3rem); letter-spacing: -0.04em; }
 .event-roster h2 > span { border-radius: 99px; background: var(--navy-800); color: var(--blue-300); font-size: 0.7rem; padding: 0.2rem 0.55rem; }
 .event-team-list { list-style: none; margin: 0; padding: 0; }
@@ -731,7 +753,7 @@ html[data-theme="light"] .settings-saved {
 	.dashboard-page { padding-top: 1.5rem; }
 	.dashboard-grid { grid-template-columns: 1fr; }
 	.dashboard-frc-profile-content, .dashboard-current-robots { grid-template-columns: 1fr; }
-	.dashboard-events-tile, .dashboard-robot-tile, .dashboard-score-tile, .dashboard-matches-tile, .dashboard-shortcuts-tile { grid-column: 1; }
+	.dashboard-events-tile, .dashboard-robot-tile, .dashboard-score-tile, .dashboard-matches-tile, .dashboard-shortcuts-tile, .dashboard-recent-tile { grid-column: 1; }
 	.dashboard-matches-tile { min-height: 0; }
 	.dashboard-match-alliances { gap: 0.4rem; }
 	.dashboard-heading { align-items: flex-start; flex-direction: column; }

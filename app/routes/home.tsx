@@ -8,6 +8,7 @@ import { ScoreTrendChart, type EventPerformance } from "../components/score-tren
 import { AutoPathField, type AutoPath, type RobotAuto } from "../components/auto-path-field";
 import { ScoutingDashboard } from "../components/scouting-dashboard";
 import { TopNavigation } from "../components/top-navigation";
+import { trackRecentPage } from "../recent-pages.client";
 
 // quick type definition for generic json objects from api
 type JsonRecord = Record<string, unknown>;
@@ -203,6 +204,9 @@ export default function Home() {
             setResult(teamResult);
             setSocialLinks(teamResult.socialLinks);
             setIsEditingSocials(false);
+            const params = new URLSearchParams({ team: normalizedTeamNumber, league: targetLeague, season: targetSeason });
+            const teamName = textValue(teamResult.team, ["name", "nickname", "teamName", "nameShort"]);
+            trackRecentPage(`/home?${params}`, `${targetLeague} ${normalizedTeamNumber}${teamName ? ` · ${teamName}` : ""}`, `${targetSeason} season`);
         } catch (lookupError) {
             scrollToResultAfterSearch.current = false;
             setError(lookupError instanceof Error ? lookupError.message : "Team lookup failed.");

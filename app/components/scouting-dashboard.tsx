@@ -2,6 +2,8 @@ import { useAuth, useUser } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import { ScoreTrendChart, type EventPerformance } from "./score-trend-chart";
 import { TopNavigation } from "./top-navigation";
+import { readContributorName, saveContributorName as saveLocalContributorName } from "../contributor.client";
+import { readRecentPages, subscribeToRecentPages, type RecentPage } from "../recent-pages.client";
 
 type League = "FTC" | "FRC";
 type RecordValue = Record<string, unknown>;
@@ -167,6 +169,13 @@ export function ScoutingDashboard() {
 	const [showContributorEditor, setShowContributorEditor] = useState(false);
 	const [contributorDraft, setContributorDraft] = useState("");
 	const [savingContributor, setSavingContributor] = useState(false);
+	const [recentPages, setRecentPages] = useState<RecentPage[]>([]);
+
+	useEffect(() => {
+		const updateRecentPages = () => setRecentPages(readRecentPages());
+		updateRecentPages();
+		return subscribeToRecentPages(updateRecentPages);
+	}, []);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -186,8 +195,9 @@ export function ScoutingDashboard() {
 				if (!contributorResponse.ok || !contributorData.contributor) throw new Error(contributorData.error || "Could not load your credited name.");
 				if (cancelled) return;
 				setPersonal(settingsData.personal);
-				setContributor(contributorData.contributor);
-				setContributorDraft(contributorData.contributor.name || "");
+				const contributorName = contributorData.contributor.required ? readContributorName() : null;
+				setContributor({ ...contributorData.contributor, name: contributorName });
+				setContributorDraft(contributorName || "");
 				const number = String(settingsData.personal.ftcTeamNumber);
 				const teamResponseUrl = `/api/teams/${encodeURIComponent(number)}?${new URLSearchParams({ league: "ftc", season })}`;
 				const frcTeamResponseUrl = `/api/teams/5837?${new URLSearchParams({ league: "frc", season })}`;
@@ -343,16 +353,9 @@ export function ScoutingDashboard() {
 		setSavingContributor(true);
 		setError("");
 		try {
-			const token = await getToken();
-			const response = await fetch("/api/settings", {
-				method: "PUT",
-				headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-				body: JSON.stringify({ action: "contributor-name", contributorName: contributorDraft }),
-			});
-			const data = await readResponse<{ contributor?: ContributorSession; error?: string }>(response);
-			if (!response.ok || !data.contributor) throw new Error(data.error || "Could not save your credited name.");
-			setContributor(data.contributor);
-			setContributorDraft(data.contributor.name || "");
+			const name = saveLocalContributorName(contributorDraft);
+			setContributor((current) => ({ ...current, name }));
+			setContributorDraft(name);
 			setShowContributorEditor(false);
 		} catch (saveError) {
 			setError(saveError instanceof Error ? saveError.message : "Could not save your credited name.");
@@ -408,13 +411,20 @@ export function ScoutingDashboard() {
 			<TopNavigation currentPage="dashboard" />
 			<div className="dashboard-page">
 				<header className="dashboard-heading">
-					<div><p className="section-kicker">{personal.teamPreset === "SLB" ? "FRC 5837 + FTC 7247 + FTC 5445" : `${league} ${teamNumber}`} · {season}-{String(Number(season) + 1).slice(-2)} season</p><h1>Welcome, {contributor.required ? contributor.name || "iPad" : user?.username || user?.firstName || "scout"}</h1></div>
+					<div><p className="section-kicker">{personal.teamPreset === "SLB" ? "FRC 5837 + FTC 7247 + FTC 5445" : `${league} ${teamNumber}`} · {season}-{String(Number(season) + 1).slice(-2)} season</p><h1>Welcome, {contributor.required ? contributor.name || "iPad" : user?.username || user?.firstName || "scout"}</h1>
+						{contributor.required && <button className="dashboard-contributor-edit" type="button" aria-expanded={showContributorEditor} onClick={() => setShowContributorEditor((current) => !current)}>{showContributorEditor ? "Cancel name change" : "Change iPad name"}</button>}
+					</div>
 					<div className="dashboard-heading-actions">
 						<a className="dashboard-team-link" href={`/home?${new URLSearchParams({ team: teamNumber, league, season })}`}>Team {teamNumber}<span aria-hidden="true">↗</span></a>
 						{personal.teamPreset === "SLB" && <a className="dashboard-team-link" href={`/home?${new URLSearchParams({ team: "5837", league: "FRC", season })}`}>FRC 5837<span aria-hidden="true">↗</span></a>}
 						{personal.teamPreset === "SLB" && <a className="dashboard-team-link" href={`/home?${new URLSearchParams({ team: "5445", league: "FTC", season })}`}>FTC 5445<span aria-hidden="true">↗</span></a>}
 					</div>
 				</header>
+				{showContributorEditor && <form className="dashboard-contributor-form" onSubmit={(event) => void saveContributorName(event)}>
+					<label htmlFor="dashboard-contributor-name">Name credited for this iPad</label>
+					<input id="dashboard-contributor-name" value={contributorDraft} onChange={(event) => setContributorDraft(event.target.value)} maxLength={12} autoComplete="off" required />
+					<button className="search-button" type="submit" disabled={savingContributor || !contributorDraft.trim()}>{savingContributor ? "Saving..." : "Save iPad name"}</button>
+				</form>}
 				{error && <p className="lookup-error" role="alert">{error}</p>}
 				{loading ? <p className="dashboard-status" aria-busy="true">Loading your team dashboard...</p> : <div className="dashboard-grid">
 					<section className="dashboard-tile dashboard-events-tile" aria-labelledby="dashboard-events-title">
@@ -475,6 +485,19 @@ export function ScoutingDashboard() {
 							<button className="search-button" type="submit" disabled={savingShortcut || personal.shortcuts.length >= 12}>{savingShortcut ? "Saving..." : "Add shortcut"}</button>
 						</form>}
 						{personal.shortcuts.length ? <ul className="dashboard-shortcut-list">{personal.shortcuts.map((shortcut) => <li key={shortcut.id}><a href={shortcutHref(shortcut)}><span>{shortcut.label}</span><small>{shortcut.kind}</small></a><button type="button" onClick={() => void removeShortcut(shortcut.id)} disabled={savingShortcut} aria-label={`Remove ${shortcut.label}`} title="Remove shortcut">×</button></li>)}</ul> : <p className="dashboard-empty">Add event, team, or comparison links for quick access.</p>}
+					</section>
+					<section className="dashboard-tile dashboard-recent-tile" aria-labelledby="dashboard-recent-title">
+						<header className="dashboard-tile-heading"><div><h2 id="dashboard-recent-title">Recently visited</h2></div></header>
+						{recentPages.length ? <ul className="dashboard-recent-list">{recentPages.map((page) => {
+							const visitedAt = new Date(page.visitedAt);
+							return <li key={page.href}>
+								<a href={page.href}>
+									<strong>{page.title}</strong>
+									{page.detail && <span>{page.detail}</span>}
+									<small>{Number.isNaN(visitedAt.getTime()) ? "" : visitedAt.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</small>
+								</a>
+							</li>;
+						})}</ul> : <p className="dashboard-empty">Pages you visit will appear here on this device.</p>}
 					</section>
 					{personal.teamPreset === "SLB" && <section className="dashboard-tile dashboard-frc-profile-tile" aria-labelledby="dashboard-frc-profile-title">
 						<header className="dashboard-tile-heading">

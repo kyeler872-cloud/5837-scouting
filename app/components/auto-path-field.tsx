@@ -28,11 +28,13 @@ function toSvgPath(path: AutoPath) {
 	}, path.points.length ? `M ${path.points[0].x} ${path.points[0].y}` : "");
 }
 
-export function AutoPathField({ path, color = "#ffffff", editable = false, onChange }: {
+export function AutoPathField({ path, color = "#ffffff", editable = false, onChange, fieldImage: image = fieldImage, seasonLabel = "2026–27" }: {
 	path: AutoPath;
 	color?: string;
 	editable?: boolean;
 	onChange?: (path: AutoPath) => void;
+	fieldImage?: string;
+	seasonLabel?: string;
 }) {
 	const [placingPoints, setPlacingPoints] = useState(false);
 	const [draggingControl, setDraggingControl] = useState<number | null>(null);
@@ -140,7 +142,7 @@ export function AutoPathField({ path, color = "#ffffff", editable = false, onCha
 				className="auto-path-svg"
 				viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`}
 				role="img"
-				aria-label="2026–27 FTC field with autonomous robot path"
+				aria-label={`${seasonLabel} FTC field with autonomous robot path`}
 				onPointerDown={addPoint}
 				onPointerMove={moveControl}
 				onPointerUp={finishPointer}
@@ -185,14 +187,16 @@ export function AutoPathField({ path, color = "#ffffff", editable = false, onCha
 	);
 }
 
-export function AutoPathComparisonField({ paths }: {
+export function AutoPathComparisonField({ paths, fieldImage: image = fieldImage, seasonLabel = "2026–27" }: {
 	paths: { key: string; label: string; color: string; path: AutoPath }[];
+	fieldImage?: string;
+	seasonLabel?: string;
 }) {
 	if (!paths.length) return <p className="score-trend-empty">Select autos above to compare their paths on the field.</p>;
 	return (
 		<div className="auto-path-field">
-			<svg className="auto-path-svg" viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} role="img" aria-label="Selected autonomous paths overlaid on the 2026–27 FTC field">
-				<image className="auto-path-artwork" href={fieldImage} x="0" y="0" width={VIEW_SIZE} height={VIEW_SIZE} preserveAspectRatio="none" />
+			<svg className="auto-path-svg" viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} role="img" aria-label={`Selected autonomous paths overlaid on the ${seasonLabel} FTC field`}>
+				<image className="auto-path-artwork" href={image} x="0" y="0" width={VIEW_SIZE} height={VIEW_SIZE} preserveAspectRatio="none" />
 				{paths.map((item) => <g key={item.key}>
 					<path className="auto-path-artwork" d={toSvgPath(item.path)} fill="none" stroke="#071426" strokeWidth="15" strokeLinecap="round" strokeLinejoin="round" />
 					<path className="auto-path-artwork" d={toSvgPath(item.path)} fill="none" stroke={item.color} strokeWidth="8" strokeLinecap="round" strokeLinejoin="round">

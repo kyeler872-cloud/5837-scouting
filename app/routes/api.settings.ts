@@ -1,7 +1,7 @@
 import { verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.settings";
 import { cloudflareContext } from "../cloudflare-context";
-import { getAuditActor, getContributorSetup } from "../audit.server";
+import { getAuditActor, getContributorSetup, getLocalContributorName } from "../audit.server";
 
 type SettingsEnv = Env & { SCOUTING_DB?: D1Database };
 type CompatibilityWeights = {
@@ -159,7 +159,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
 	try {
 		if (new URL(request.url).searchParams.get("scope") === "contributor") {
-			return json({ contributor: await getContributorSetup(env, session.sub) });
+			const setup = await getContributorSetup(env, session.sub);
+			return json({ contributor: { ...setup, name: setup.required ? getLocalContributorName(request) : null } });
 		}
 		const accountSettings = await readAccountPersonalSettings(env, session.sub);
 		if (new URL(request.url).searchParams.get("scope") === "personal") return json(accountSettings);
@@ -189,22 +190,23 @@ export async function action({ request, context }: Route.ActionArgs) {
 		return json({ error: "Invalid compatibility settings payload." }, 400);
 	}
 	if (body.action === "contributor-name") {
+		if (typeof body.contributorName !== "string") return json({ error: "Enter a credited name." }, 400);
+		const name = body.contributorName.trim();
+		if (!name || name.length > 12 || /[\r\n\0]/.test(name)) return json({ error: "Enter a name from 1 to 12 characters." }, 400);
 		try {
 			const setup = await getContributorSetup(env, session.sub);
 			if (!setup.required) return json({ error: "Credited names are only available for the designated account." }, 403);
-			if (typeof body.contributorName !== "string") return json({ error: "Enter a credited name." }, 400);
-			const name = body.contributorName.trim();
-			if (!name || name.length > 12 || /[\r\n\0]/.test(name)) return json({ error: "Enter a name from 1 to 12 characters." }, 400);
-			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings (user_id, contributor_name, contributor_name_expires_at, updated_at)
-				VALUES (?, ?, datetime('now', '+1 hour'), CURRENT_TIMESTAMP)
-				ON CONFLICT(user_id) DO UPDATE SET contributor_name = excluded.contributor_name,
-				contributor_name_expires_at = excluded.contributor_name_expires_at, updated_at = excluded.updated_at`)
-				.bind(session.sub, name)
-				.run();
-			return json({ contributor: await getContributorSetup(env, session.sub) });
+			const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+			return new Response(JSON.stringify({ contributor: { required: true, name, expiresAt: null } }), {
+				headers: {
+					"cache-control": "private, no-store",
+					"content-type": "application/json",
+					"set-cookie": `scouting-contributor-name=${encodeURIComponent(name)}; Path=/; Max-Age=31536000; SameSite=Lax${secure}`,
+				},
+			});
 		} catch (error) {
 			console.error(JSON.stringify({ message: "Could not save contributor name", error: error instanceof Error ? error.message : String(error) }));
-			return json({ error: "Could not save your credited name. Confirm the latest database migration has been applied." }, 503);
+			return json({ error: "Could not save your credited name." }, 503);
 		}
 	}
 	if (body.personal) {
@@ -250,7 +252,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 	if (!weights) return json({ error: "Each compatibility influence must be a number from 0 to 100." }, 400);
 
 	try {
-		const actor = await getAuditActor(env, session.sub);
+		const actor = await getAuditActor(env, session.sub, getLocalContributorName(request), true);
 		await env.SCOUTING_DB.prepare(`INSERT INTO compatibility_settings (id, weights, updated_by_account_name, updated_at)
 			VALUES ('global', ?, ?, CURRENT_TIMESTAMP)
 			ON CONFLICT(id) DO UPDATE SET weights = excluded.weights, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)

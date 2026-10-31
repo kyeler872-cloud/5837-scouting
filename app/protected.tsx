@@ -1,6 +1,7 @@
 import { useAuth, useUser } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import { Navigate } from "react-router";
+import { readContributorName, saveContributorName as saveLocalContributorName } from "./contributor.client";
 
 const CONTRIBUTOR_EMAIL = "frcteam5837@gmail.com";
 
@@ -9,7 +10,6 @@ export function Protected({ children }: { children: React.ReactNode }) {
 	const { isLoaded: isUserLoaded, user } = useUser();
 	const [timedOut, setTimedOut] = useState(false);
 	const [contributorStatus, setContributorStatus] = useState<"checking" | "ready" | "required" | "error">("checking");
-	const [contributorName, setContributorName] = useState("");
 	const [nameDraft, setNameDraft] = useState("");
 	const [contributorError, setContributorError] = useState("");
 	const [isSavingName, setIsSavingName] = useState(false);
@@ -43,9 +43,9 @@ export function Protected({ children }: { children: React.ReactNode }) {
 				const data = await response.json() as { contributor?: { required: boolean; name: string | null }; error?: string };
 				if (!response.ok || !data.contributor) throw new Error(data.error || "Could not check your credited name.");
 				if (!active) return;
-				setContributorName(data.contributor.name || "");
-				setNameDraft(data.contributor.name || "");
-				setContributorStatus(data.contributor.required && !data.contributor.name ? "required" : "ready");
+				const name = data.contributor.required ? readContributorName() : null;
+				setNameDraft(name || "");
+				setContributorStatus(data.contributor.required && !name ? "required" : "ready");
 			} catch (error) {
 				if (!active) return;
 				setContributorError(error instanceof Error ? error.message : "Could not check your credited name.");
@@ -82,15 +82,7 @@ export function Protected({ children }: { children: React.ReactNode }) {
 			setIsSavingName(true);
 			setContributorError("");
 			try {
-				const token = await getToken();
-				const response = await fetch("/api/settings", {
-					method: "PUT",
-					headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-					body: JSON.stringify({ action: "contributor-name", contributorName: nameDraft }),
-				});
-				const data = await response.json() as { contributor?: { name: string | null }; error?: string };
-				if (!response.ok || !data.contributor?.name) throw new Error(data.error || "Could not save your credited name.");
-				setContributorName(data.contributor.name);
+				const name = saveLocalContributorName(nameDraft);
 				setContributorStatus("ready");
 			} catch (error) {
 				setContributorError(error instanceof Error ? error.message : "Could not save your credited name.");
@@ -102,7 +94,7 @@ export function Protected({ children }: { children: React.ReactNode }) {
 		return <main className="contributor-name-page"><section>
 			<p className="section-kicker">Contribution credit</p>
 			<h1>What is your name?</h1>
-			<p>This name will be credited for your contributions. It expires after one hour.</p>
+			<p>This name is saved only on this iPad and will be credited for its contributions.</p>
 			<form onSubmit={(event) => void saveContributorName(event)}>
 				<label htmlFor="contributor-name">Name</label>
 				<input id="contributor-name" value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} maxLength={12} autoComplete="off" required />

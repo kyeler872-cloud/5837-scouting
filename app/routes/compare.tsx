@@ -373,7 +373,7 @@ export default function Compare() {
 							<AutoPathComparisonField paths={chosenAutos} />
 						</section>}
 					</>}
-					//start of the worst algorithm ever created ever 
+					
 					<section className="match-compare-section" aria-labelledby="match-compare-title">
 						<header>
 							<p className="section-kicker">{matchLeague} · {matchSeason}</p>
