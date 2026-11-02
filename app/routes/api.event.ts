@@ -28,7 +28,7 @@ type EventMatch = {
 	blueScore: number | null;
 	completed: boolean;
 	prediction: { redScore: number | null; blueScore: number | null; redWinProbability: number | null };
-	notes: Partial<Record<MatchPhase, { value: string; displayName: string }>>;
+	notes: Partial<Record<MatchPhase, { id: string; value: string; displayName: string }[]>>;
 	autoPath?: { path: AutoPath; displayName: string } | null;
 	autoSelections?: EventAutoSelection[];
 };
@@ -429,20 +429,45 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	}
 
 	const matches = custom ? [] : qualificationMatches(scheduleData, league);
-	const [notes, assets, manualTeams, matchNotes, compatibilityRow, robotRows] = await Promise.all([
+	const [notes, assets, manualTeams, compatibilityRow, robotRows] = await Promise.all([
 		env.SCOUTING_DB.prepare("SELECT category, note, updated_by_account_name FROM event_notes WHERE league = ? AND season = ? AND event_code = ?")
 			.bind(league, season, eventCode).all<{ category: string; note: string; updated_by_account_name: string }>(),
 		env.SCOUTING_DB.prepare("SELECT photos_url FROM event_assets WHERE league = ? AND season = ? AND event_code = ?")
 			.bind(league, season, eventCode).first<{ photos_url: string }>(),
 		env.SCOUTING_DB.prepare("SELECT team_number, team_name FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? ORDER BY team_number")
 			.bind(league, season, eventCode).all<{ team_number: string; team_name: string }>(),
-		env.SCOUTING_DB.prepare("SELECT match_key, phase, note, updated_by_account_name FROM event_match_scouting WHERE league = ? AND season = ? AND event_code = ?")
-			.bind(league, season, eventCode).all<{ match_key: string; phase: MatchPhase; note: string; updated_by_account_name: string }>(),
 		env.SCOUTING_DB.prepare("SELECT weights FROM compatibility_settings WHERE id = 'global'")
 			.first<{ weights: string }>(),
 		env.SCOUTING_DB.prepare("SELECT id, team_number, name, autos, start_month, created_at, scoring_capabilities FROM robot_entries WHERE season = ? AND end_month IS NULL ORDER BY start_month DESC, created_at DESC")
 			.bind(season).all<{ id: string; team_number: string; name: string; autos: string; start_month: string; created_at: string; scoring_capabilities: string }>(),
 	]);
+	let matchNotes: { results: { id: string; match_key: string; phase: MatchPhase; note: string; contributor_name: string }[] };
+	let matchNotesMigrationPending = false;
+	try {
+		matchNotes = await env.SCOUTING_DB.prepare(`SELECT id, match_key, phase, note, contributor_name
+			FROM event_match_scouting_notes WHERE league = ? AND season = ? AND event_code = ? ORDER BY created_at, id`)
+			.bind(league, season, eventCode).all<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_name: string }>();
+	} catch (error) {
+		if (!(error instanceof Error) || !/no such table:\s*event_match_scouting_notes/i.test(error.message)) throw error;
+		matchNotesMigrationPending = true;
+		console.error(JSON.stringify({
+			message: "Contributor match notes are unavailable because their migration has not been applied",
+			migration: "0019_event_match_note_entries.sql",
+		}));
+		const legacyNotes = await env.SCOUTING_DB.prepare(`SELECT match_key, phase, note, updated_by_account_name
+			FROM event_match_scouting WHERE league = ? AND season = ? AND event_code = ? ORDER BY updated_at, match_key, phase`)
+			.bind(league, season, eventCode)
+			.all<{ match_key: string; phase: MatchPhase; note: string; updated_by_account_name: string }>();
+		matchNotes = {
+			results: legacyNotes.results.filter((item) => item.note.trim()).map((item) => ({
+				id: `legacy:${item.match_key}:${item.phase}`,
+				match_key: item.match_key,
+				phase: item.phase,
+				note: item.note,
+				contributor_name: item.updated_by_account_name,
+			})),
+		};
+	}
 	let matchAutoPaths: { results: { match_key: string; path: string; updated_by_account_name: string }[] } = { results: [] };
 	let autoPathMigrationPending = false;
 	try {
@@ -493,7 +518,9 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const autoSelectionsByMatch = new Map<string, EventAutoSelection[]>();
 	for (const item of matchNotes.results) {
 		const notes = notesByMatch.get(item.match_key) || {};
-		notes[item.phase] = { value: item.note, displayName: item.updated_by_account_name };
+		const phaseNotes = notes[item.phase] || [];
+		phaseNotes.push({ id: item.id, value: item.note, displayName: item.contributor_name });
+		notes[item.phase] = phaseNotes;
 		notesByMatch.set(item.match_key, notes);
 	}
 	for (const item of matchAutoPaths.results) {
@@ -551,6 +578,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		photosUrl: assets?.photos_url || "",
 		warning: [
 			warning,
+			matchNotesMigrationPending ? "Adding individual match notes is temporarily unavailable. Apply database migration 0019." : null,
 			autoPathMigrationPending ? "Legacy unassigned qualification paths are unavailable until migration 0017 is applied." : null,
 			autoSelectionMigrationPending ? "Team auto selection is temporarily unavailable. Apply database migration 0018 to enable it." : null,
 		].filter(Boolean).join(" ") || null,
@@ -631,20 +659,18 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 				}
 			}
 			const statements: D1PreparedStatement[] = [];
-			const savedNotes: Partial<Record<MatchPhase, { value: string; displayName: string }>> = {};
+			const savedNotes: Partial<Record<MatchPhase, { id: string; value: string; displayName: string }>> = {};
 			for (const [phase, note] of Object.entries(noteEdits) as [MatchPhase, string][]) {
-				const previous = await env.SCOUTING_DB.prepare(`SELECT note FROM event_match_scouting
-					WHERE league = ? AND season = ? AND event_code = ? AND match_key = ? AND phase = ?`)
-					.bind(league, season, eventCode, body.matchKey, phase).first<{ note: string }>();
-				if ((previous?.note ?? "") === note) continue;
+				if (!note) continue;
+				const id = crypto.randomUUID();
 				statements.push(
-					env.SCOUTING_DB.prepare(`INSERT INTO event_match_scouting (league, season, event_code, match_key, phase, note, updated_by, updated_by_account_name, updated_at)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-						ON CONFLICT(league, season, event_code, match_key, phase) DO UPDATE SET note = excluded.note, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-						.bind(league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
-					auditStatement(env.SCOUTING_DB, actor, "Updated qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, previous?.note ?? null, note),
+					env.SCOUTING_DB.prepare(`INSERT INTO event_match_scouting_notes
+						(id, league, season, event_code, match_key, phase, note, contributor_id, contributor_name)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+						.bind(id, league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
+					auditStatement(env.SCOUTING_DB, actor, "Added qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, null, note),
 				);
-				savedNotes[phase] = { value: note, displayName };
+				savedNotes[phase] = { id, value: note, displayName };
 			}
 
 			if (requestedAutoMapping && verifiedMatch) {
@@ -708,18 +734,17 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			if (typeof body.category !== "string" || !MATCH_PHASES.includes(body.category as MatchPhase)) return json({ error: "Choose Auto, TeleOp, or Endgame." }, 400);
 			if (typeof body.note !== "string" || body.note.length > 10000) return json({ error: "Match notes must be 10,000 characters or fewer." }, 400);
 			const phase = body.category as MatchPhase;
-			const previous = await env.SCOUTING_DB.prepare(`SELECT note FROM event_match_scouting
-				WHERE league = ? AND season = ? AND event_code = ? AND match_key = ? AND phase = ?`)
-				.bind(league, season, eventCode, body.matchKey, phase).first<{ note: string }>();
 			const note = body.note.trim();
+			if (!note) return json({ error: "Enter a note before adding it." }, 400);
+			const id = crypto.randomUUID();
 			await env.SCOUTING_DB.batch([
-				env.SCOUTING_DB.prepare(`INSERT INTO event_match_scouting (league, season, event_code, match_key, phase, note, updated_by, updated_by_account_name, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-					ON CONFLICT(league, season, event_code, match_key, phase) DO UPDATE SET note = excluded.note, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-					.bind(league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
-				auditStatement(env.SCOUTING_DB, actor, "Updated qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, previous?.note ?? null, note),
+				env.SCOUTING_DB.prepare(`INSERT INTO event_match_scouting_notes
+					(id, league, season, event_code, match_key, phase, note, contributor_id, contributor_name)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					.bind(id, league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
+				auditStatement(env.SCOUTING_DB, actor, "Added qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, null, note),
 			]);
-			return json({ matchKey: body.matchKey, phase, note: { value: note, displayName } });
+			return json({ matchKey: body.matchKey, phase, note: { id, value: note, displayName } });
 		}
 		if (body.action === "note") {
 			if (typeof body.category !== "string" || !NOTE_CATEGORIES.includes(body.category as typeof NOTE_CATEGORIES[number])) return json({ error: "Choose a valid note category." }, 400);
@@ -791,6 +816,10 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		}
 		return json({ error: "Choose a valid event edit." }, 400);
 	} catch (error) {
+		if (error instanceof Error && /no such table:\s*event_match_scouting_notes/i.test(error.message)) {
+			console.error(JSON.stringify({ message: "Could not save contributor match note because migration 0019 is not applied" }));
+			return json({ error: "Individual match notes are not ready. Apply database migration 0019 and try again." }, 503);
+		}
 		if (error instanceof Error && /no such table:\s*event_match_auto_selections/i.test(error.message)) {
 			console.error(JSON.stringify({ message: "Could not save team auto selection because migration 0018 is not applied" }));
 			return json({ error: "Team auto selection is not ready. Apply database migration 0018 and try again." }, 503);

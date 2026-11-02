@@ -42,9 +42,13 @@ type ScheduleMatch = {
 	blueTeams: string[];
 	scheduledTime: string | null;
 	completed: boolean;
+	redScore: number | null;
+	blueScore: number | null;
 	prediction: { redScore: number | null; blueScore: number | null; redWinProbability: number | null };
 };
 type EventSchedule = { matches: ScheduleMatch[] };
+type LatestMatchResult = { event: EventLink; match: ScheduleMatch };
+type LatestMatchResults = { results: LatestMatchResult[]; error: string };
 type ShortcutKind = DashboardShortcut["kind"];
 
 const season = "2026";
@@ -122,6 +126,36 @@ function nextScheduledMatch(matches: ScheduleMatch[], teamNumber: string) {
 	) || matches.find((match) => !match.completed && match.teams.includes(teamNumber)) || null;
 }
 
+function latestCompletedMatches(matches: ScheduleMatch[], teamNumber: string) {
+	return matches.filter((match) =>
+		match.completed && match.redScore !== null && match.blueScore !== null && match.teams.includes(teamNumber),
+	).slice(-2).reverse();
+}
+
+async function fetchLatestResults(events: EventLink[], teamNumber: string, league: League, getToken: () => Promise<string | null>): Promise<LatestMatchResults> {
+	const token = await getToken();
+	const results: LatestMatchResult[] = [];
+	let lastError = "";
+	const recentEvents = events.filter((event) => !event.custom)
+		.sort((first, second) => (first.end || first.start || "0000").localeCompare(second.end || second.start || "0000"))
+		.reverse();
+	for (const event of recentEvents) {
+		try {
+			const response = await fetch(`/api/events/${league}/${encodeURIComponent(season)}/${encodeURIComponent(event.code)}`, {
+				headers: token ? { Authorization: ["Bearer", token].join(" ") } : undefined,
+			});
+			const data = await readResponse<EventSchedule | { error?: string }>(response);
+			if (!response.ok) throw new Error("error" in data ? data.error || "Could not load event results." : "Could not load event results.");
+			if (!("matches" in data) || !Array.isArray(data.matches)) throw new Error("Event results response did not include a match list.");
+			results.push(...latestCompletedMatches(data.matches, teamNumber).map((match) => ({ event, match })));
+			if (results.length >= 2) break;
+		} catch (loadError) {
+			lastError = loadError instanceof Error ? loadError.message : "Could not load event results.";
+		}
+	}
+	return { results: results.slice(0, 2), error: results.length ? "" : lastError };
+}
+
 function matchTime(match: RecordValue) {
 	const raw = match.time ?? match.scheduledTime;
 	if (typeof raw === "number") return new Date(raw < 10_000_000_000 ? raw * 1000 : raw);
@@ -155,6 +189,10 @@ export function ScoutingDashboard() {
 	const [secondFtcSchedule, setSecondFtcSchedule] = useState<EventSchedule | null>(null);
 	const [isLoadingSecondFtcSchedule, setIsLoadingSecondFtcSchedule] = useState(false);
 	const [secondFtcScheduleError, setSecondFtcScheduleError] = useState("");
+	const [latestResults, setLatestResults] = useState<LatestMatchResults>({ results: [], error: "" });
+	const [isLoadingLatestResults, setIsLoadingLatestResults] = useState(false);
+	const [secondFtcLatestResults, setSecondFtcLatestResults] = useState<LatestMatchResults>({ results: [], error: "" });
+	const [isLoadingSecondFtcLatestResults, setIsLoadingSecondFtcLatestResults] = useState(false);
 	const [error, setError] = useState("");
 	const [loading, setLoading] = useState(true);
 	const [showShortcutForm, setShowShortcutForm] = useState(false);
@@ -323,6 +361,23 @@ export function ScoutingDashboard() {
 
 	useEffect(() => {
 		let cancelled = false;
+		setLatestResults({ results: [], error: "" });
+		if (!team) {
+			setIsLoadingLatestResults(false);
+			return () => { cancelled = true; };
+		}
+		setIsLoadingLatestResults(true);
+		void fetchLatestResults(eventRecords(team, league), teamNumber, league, getToken)
+			.then((result) => { if (!cancelled) setLatestResults(result); })
+			.catch((loadError: unknown) => {
+				if (!cancelled) setLatestResults({ results: [], error: loadError instanceof Error ? loadError.message : "Could not load latest results." });
+			})
+			.finally(() => { if (!cancelled) setIsLoadingLatestResults(false); });
+		return () => { cancelled = true; };
+	}, [getToken, league, team, teamNumber]);
+
+	useEffect(() => {
+		let cancelled = false;
 		setSecondFtcSchedule(null);
 		setSecondFtcScheduleError("");
 		if (personal.teamPreset !== "SLB" || !secondFtcScheduleEvent) {
@@ -347,6 +402,23 @@ export function ScoutingDashboard() {
 		})();
 		return () => { cancelled = true; };
 	}, [getToken, personal.teamPreset, secondFtcScheduleEvent?.code]);
+
+	useEffect(() => {
+		let cancelled = false;
+		setSecondFtcLatestResults({ results: [], error: "" });
+		if (personal.teamPreset !== "SLB" || !secondFtcTeam) {
+			setIsLoadingSecondFtcLatestResults(false);
+			return () => { cancelled = true; };
+		}
+		setIsLoadingSecondFtcLatestResults(true);
+		void fetchLatestResults(eventRecords(secondFtcTeam, "FTC"), "5445", "FTC", getToken)
+			.then((result) => { if (!cancelled) setSecondFtcLatestResults(result); })
+			.catch((loadError: unknown) => {
+				if (!cancelled) setSecondFtcLatestResults({ results: [], error: loadError instanceof Error ? loadError.message : "Could not load FTC 5445's latest results." });
+			})
+			.finally(() => { if (!cancelled) setIsLoadingSecondFtcLatestResults(false); });
+		return () => { cancelled = true; };
+	}, [getToken, personal.teamPreset, secondFtcTeam]);
 
 	async function saveContributorName(event: React.FormEvent<HTMLFormElement>) {
 		event.preventDefault();
@@ -474,6 +546,13 @@ export function ScoutingDashboard() {
 											: <p className="dashboard-empty">{secondFtcScheduleEvent ? "No upcoming qualification for FTC 5445." : "No current or upcoming FTC event is listed for team 5445."}</p>}
 						</div>}
 					</section>
+					<section className="dashboard-tile dashboard-results-tile" aria-labelledby="dashboard-results-title">
+						<header className="dashboard-tile-heading"><div><h2 id="dashboard-results-title">Latest results</h2></div></header>
+						<LatestMatchResults results={latestResults.results} teamNumber={teamNumber} league={league} isLoading={isLoadingLatestResults} error={latestResults.error} />
+						{personal.teamPreset === "SLB" && <div className="dashboard-second-team-match">
+							<LatestMatchResults results={secondFtcLatestResults.results} teamNumber="5445" league="FTC" isLoading={isLoadingSecondFtcLatestResults} error={secondFtcTeamError || secondFtcLatestResults.error} />
+						</div>}
+					</section>
 					<section className="dashboard-tile dashboard-shortcuts-tile" aria-labelledby="dashboard-shortcuts-title">
 						<header className="dashboard-tile-heading"><div><h2 id="dashboard-shortcuts-title">Shortcuts</h2></div><button className="dashboard-add-shortcut" type="button" title="Add shortcut" aria-label="Add shortcut" aria-expanded={showShortcutForm} onClick={() => setShowShortcutForm((current) => !current)}><span aria-hidden="true">+</span></button></header>
 						{showShortcutForm && <form className="dashboard-shortcut-form" onSubmit={(event) => void addShortcut(event)}>
@@ -564,4 +643,43 @@ function NextMatchCard({ event, match, teamNumber, winProbability, favoriteTeams
 			{projectedOwnScore !== null && projectedOpponentScore !== null && <small>Projected score: {projectedOwnScore} - {projectedOpponentScore}</small>}
 		</div>
 	</article>;
+}
+
+function LatestMatchResults({ results, teamNumber, league, isLoading, error }: {
+	results: LatestMatchResult[];
+	teamNumber: string;
+	league: League;
+	isLoading: boolean;
+	error: string;
+}) {
+	if (isLoading) return <p className="dashboard-empty" aria-busy="true">Loading {league} {teamNumber}'s latest results...</p>;
+	if (error) return <p className="dashboard-empty" role="alert">{error}</p>;
+	if (!results.length) return <p className="dashboard-empty">No completed matches found for {league} {teamNumber} at current or previous events.</p>;
+	return <div className="dashboard-result-list">
+		{results.map(({ event, match }) => {
+			const isRedAlliance = match.redTeams.includes(teamNumber);
+			const ownScore = isRedAlliance ? match.redScore! : match.blueScore!;
+			const opponentScore = isRedAlliance ? match.blueScore! : match.redScore!;
+			const outcome = ownScore === opponentScore ? "Tie" : ownScore > opponentScore ? "Win" : "Loss";
+			const blueScoreClass = match.blueScore! === match.redScore! ? "" : match.blueScore! > match.redScore! ? "dashboard-result-score-winning" : "dashboard-result-score-losing";
+			const redScoreClass = match.redScore! === match.blueScore! ? "" : match.redScore! > match.blueScore! ? "dashboard-result-score-winning" : "dashboard-result-score-losing";
+			return <article className={`dashboard-result-card dashboard-result-${outcome.toLowerCase()}`} key={`${event.code}-${match.matchKey}-${teamNumber}`}>
+				<header className="dashboard-result-heading">
+					<span className="dashboard-result-event">{league} {teamNumber} · {event.name}</span>
+					<strong><a href={eventHref(event, league, teamNumber, match.matchKey)}>Qualification {match.qualificationNumber}</a></strong>
+					<em>{outcome}</em>
+				</header>
+				<div className="dashboard-result-alliances" aria-label={`Final score: blue ${match.blueScore}, red ${match.redScore}`}>
+					<section className="dashboard-result-blue">
+						<h4>Blue <strong className={blueScoreClass}>{match.blueScore}</strong></h4>
+						<div>{match.blueTeams.length ? match.blueTeams.map((number) => <a className={number === teamNumber ? "dashboard-result-team-featured" : undefined} href={`/home?${new URLSearchParams({ team: number, league, season })}`} key={number}>{number}</a>) : <small>Teams unavailable</small>}</div>
+					</section>
+					<section className="dashboard-result-red">
+						<h4><strong className={redScoreClass}>{match.redScore}</strong> Red</h4>
+						<div>{match.redTeams.length ? match.redTeams.map((number) => <a className={number === teamNumber ? "dashboard-result-team-featured" : undefined} href={`/home?${new URLSearchParams({ team: number, league, season })}`} key={number}>{number}</a>) : <small>Teams unavailable</small>}</div>
+					</section>
+				</div>
+			</article>;
+		})}
+	</div>;
 }
