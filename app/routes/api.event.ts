@@ -1,7 +1,7 @@
 import { verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.event";
 import { cloudflareContext } from "../cloudflare-context";
-import { auditStatement, getAuditActor, getLocalContributorName } from "../audit.server";
+import { auditStatement, getAuditActor, getLocalContributorName, NOTE_ADMIN_EMAIL, type AuditActor } from "../audit.server";
 
 type League = "FTC" | "FRC";
 type ApiObject = Record<string, unknown>;
@@ -28,7 +28,7 @@ type EventMatch = {
 	blueScore: number | null;
 	completed: boolean;
 	prediction: { redScore: number | null; blueScore: number | null; redWinProbability: number | null };
-	notes: Partial<Record<MatchPhase, { id: string; value: string; displayName: string }[]>>;
+	notes: Partial<Record<MatchPhase, { id: string; value: string; displayName: string; canDelete: boolean }[]>>;
 	autoPath?: { path: AutoPath; displayName: string } | null;
 	autoSelections?: EventAutoSelection[];
 };
@@ -335,7 +335,8 @@ function buildMatchPredictions(
 export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const env = context.get(cloudflareContext).env as EventEnv;
 	if (!env.CLERK_SECRET_KEY) return json({ error: "Server authentication is not configured." }, 503);
-	if (!await authenticate(request, env)) return json({ error: "Authentication required." }, 401);
+	const session = await authenticate(request, env);
+	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
 
 	const league = params.league?.toUpperCase();
@@ -344,6 +345,16 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	if (league !== "FTC" && league !== "FRC") return json({ error: "Choose FTC or FRC." }, 400);
 	if (!/^\d{4}$/.test(season) || Number(season) < 1992 || Number(season) > 2100) return json({ error: "Choose a valid season." }, 400);
 	if (!/^[a-zA-Z0-9_-]{1,120}$/.test(eventCode)) return json({ error: "Invalid event code." }, 400);
+	let actor: AuditActor;
+	try {
+		actor = await getAuditActor(env, session.sub);
+	} catch (error) {
+		console.error(JSON.stringify({
+			message: "Could not verify event note permissions",
+			error: error instanceof Error ? error.message : String(error),
+		}));
+		return json({ error: "Could not verify event note permissions." }, 503);
+	}
 
 	let event: ApiObject | null = null;
 	let teams: EventTeam[] = [];
@@ -441,12 +452,12 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		env.SCOUTING_DB.prepare("SELECT id, team_number, name, autos, start_month, created_at, scoring_capabilities FROM robot_entries WHERE season = ? AND end_month IS NULL ORDER BY start_month DESC, created_at DESC")
 			.bind(season).all<{ id: string; team_number: string; name: string; autos: string; start_month: string; created_at: string; scoring_capabilities: string }>(),
 	]);
-	let matchNotes: { results: { id: string; match_key: string; phase: MatchPhase; note: string; contributor_name: string }[] };
+	let matchNotes: { results: { id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string | null; contributor_name: string }[] };
 	let matchNotesMigrationPending = false;
 	try {
-		matchNotes = await env.SCOUTING_DB.prepare(`SELECT id, match_key, phase, note, contributor_name
+		matchNotes = await env.SCOUTING_DB.prepare(`SELECT id, match_key, phase, note, contributor_id, contributor_name
 			FROM event_match_scouting_notes WHERE league = ? AND season = ? AND event_code = ? ORDER BY created_at, id`)
-			.bind(league, season, eventCode).all<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_name: string }>();
+			.bind(league, season, eventCode).all<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string; contributor_name: string }>();
 	} catch (error) {
 		if (!(error instanceof Error) || !/no such table:\s*event_match_scouting_notes/i.test(error.message)) throw error;
 		matchNotesMigrationPending = true;
@@ -464,6 +475,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 				match_key: item.match_key,
 				phase: item.phase,
 				note: item.note,
+				contributor_id: null,
 				contributor_name: item.updated_by_account_name,
 			})),
 		};
@@ -519,7 +531,12 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	for (const item of matchNotes.results) {
 		const notes = notesByMatch.get(item.match_key) || {};
 		const phaseNotes = notes[item.phase] || [];
-		phaseNotes.push({ id: item.id, value: item.note, displayName: item.contributor_name });
+		phaseNotes.push({
+			id: item.id,
+			value: item.note,
+			displayName: item.contributor_name,
+			canDelete: Boolean(item.contributor_id && (item.contributor_id === session.sub || actor.email === NOTE_ADMIN_EMAIL)),
+		});
 		notes[item.phase] = phaseNotes;
 		notesByMatch.set(item.match_key, notes);
 	}
@@ -606,6 +623,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		teamNumber?: unknown;
 		teamName?: unknown;
 		matchKey?: unknown;
+		noteId?: unknown;
 		notes?: unknown;
 		autoMapping?: unknown;
 	};
@@ -744,7 +762,29 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 					.bind(id, league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
 				auditStatement(env.SCOUTING_DB, actor, "Added qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, null, note),
 			]);
-			return json({ matchKey: body.matchKey, phase, note: { id, value: note, displayName } });
+			return json({ matchKey: body.matchKey, phase, note: { id, value: note, displayName, canDelete: true } });
+		}
+		if (body.action === "delete-match-note") {
+			if (typeof body.noteId !== "string" || !body.noteId.trim() || body.noteId.length > 100 || body.noteId.startsWith("legacy:")) {
+				return json({ error: "Choose a valid match note." }, 400);
+			}
+			const note = await env.SCOUTING_DB.prepare(`SELECT id, match_key, phase, note, contributor_id
+				FROM event_match_scouting_notes
+				WHERE id = ? AND league = ? AND season = ? AND event_code = ?`)
+				.bind(body.noteId, league, season, eventCode)
+				.first<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string }>();
+			if (!note) return json({ error: "Match note not found." }, 404);
+			if (note.contributor_id !== session.sub && actor.email !== NOTE_ADMIN_EMAIL) {
+				return json({ error: "Only the note's curator or an administrator can delete it." }, 403);
+			}
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`DELETE FROM event_match_scouting_notes
+					WHERE id = ? AND league = ? AND season = ? AND event_code = ?`)
+					.bind(note.id, league, season, eventCode),
+				auditStatement(env.SCOUTING_DB, actor, "Deleted qualification scouting note",
+					`${league} ${season} / ${eventCode} / ${note.match_key} / ${note.phase}`, note.note, null),
+			]);
+			return json({ deleted: true, noteId: note.id });
 		}
 		if (body.action === "note") {
 			if (typeof body.category !== "string" || !NOTE_CATEGORIES.includes(body.category as typeof NOTE_CATEGORIES[number])) return json({ error: "Choose a valid note category." }, 400);

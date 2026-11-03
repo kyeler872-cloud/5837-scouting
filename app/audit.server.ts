@@ -7,6 +7,7 @@ export type AuditActor = {
 };
 
 export const CONTRIBUTOR_EMAIL = "frcteam5837@gmail.com";
+export const NOTE_ADMIN_EMAIL = "kyeler872@gmail.com";
 
 export function validateContributorName(value: string | null | undefined) {
 	const name = value?.trim() || "";

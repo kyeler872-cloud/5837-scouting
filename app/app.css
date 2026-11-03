@@ -708,6 +708,9 @@ html[data-theme="light"] .settings-saved {
 .event-match-saved-phases p { margin: 0; color: var(--muted); font-size: 0.76rem; }
 .event-match-saved-phases small { display: block; margin-top: 0.5rem; color: var(--muted); font-size: 0.63rem; }
 .event-match-note-entry + .event-match-note-entry { margin-top: 0.5rem; }
+.event-match-note-delete { margin-top: 0.35rem; border: 1px solid #a33a42; background: transparent; padding: 0.3rem 0.5rem; color: #ffb4ab; cursor: pointer; font: inherit; font-size: 0.65rem; font-weight: 750; }
+.event-match-note-delete:hover { background: #a33a42; color: white; }
+.event-match-note-delete:disabled { cursor: wait; opacity: 0.6; }
 .event-match-note-form { display: grid; gap: 0.45rem; margin-top: 0.75rem; border-top: 1px solid var(--line); padding-top: 0.65rem; }
 .event-match-note-form label { display: grid; gap: 0.4rem; color: var(--muted); font-size: 0.65rem; font-weight: 750; }
 .event-match-note-form textarea { box-sizing: border-box; width: 100%; min-height: 4.5rem; resize: vertical; border: 1px solid var(--line); background: var(--navy-900); padding: 0.6rem; color: var(--white); font: inherit; font-size: 0.75rem; line-height: 1.45; }

@@ -12,7 +12,7 @@ import field2025Image from "./FTC2025field.png";
 type League = "FTC" | "FRC";
 type EventTeam = { number: string; name: string; manual: boolean };
 type MatchPhase = "Auto" | "TeleOp" | "Endgame";
-type MatchNote = { id: string; value: string; displayName: string };
+type MatchNote = { id: string; value: string; displayName: string; canDelete: boolean };
 type EventAuto = { id: string; name: string; alliance: "red" | "blue"; score: number | null; path: AutoPath };
 type MatchAutoSelection = {
 	teamNumber: string;
@@ -245,6 +245,17 @@ export default function EventDetailPage() {
 						: match),
 				});
 				setMatchNoteDrafts((drafts) => ({ ...drafts, [`${data.matchKey}-${data.phase}`]: "" }));
+			} else if (action.action === "delete-match-note" && eventData && typeof data.noteId === "string") {
+				setEventData({
+					...eventData,
+					matches: eventData.matches.map((match) => ({
+						...match,
+						notes: Object.fromEntries(Object.entries(match.notes).map(([phase, notes]) => [
+							phase,
+							notes?.filter((note) => note.id !== data.noteId) || [],
+						])) as EventMatch["notes"],
+					})),
+				});
 			} else if (action.action === "photos" && eventData && typeof data.photosUrl === "string") {
 				setEventData({ ...eventData, photosUrl: data.photosUrl });
 			} else if (eventData) {
@@ -421,6 +432,11 @@ export default function EventDetailPage() {
 											{phaseNotes.map((note) => <article className="event-match-note-entry" key={note.id}>
 												<div className="event-match-saved-note">{renderLinkedTeamNumbers(note.value, league, season)}</div>
 												<small>Added by: {note.displayName}</small>
+												{note.canDelete && <button className="event-match-note-delete" type="button" disabled={saving} onClick={() => {
+													if (window.confirm("Delete this match note? This cannot be undone.")) {
+														void save({ action: "delete-match-note", noteId: note.id }).catch(() => undefined);
+													}
+												}}>Delete note</button>}
 											</article>)}
 											{!phaseNotes.length && <p>No notes yet</p>}
 											<form className="event-match-note-form" onSubmit={(event) => {
