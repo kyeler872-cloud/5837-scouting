@@ -12,7 +12,7 @@
 	},
 	"upload_source_maps": true,
 	"vars": {
-		"CLERK_PUBLISHABLE_KEY": "pk_test_Ym9sZC1mYWxjb24tNDI1MC5jbGVyay5hY2NvdW50cy5kZXYk",
+		"CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuNTgzN3Njb3V0LmFwcCQ",
 		"VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare"
 	},
 	"d1_databases": [
