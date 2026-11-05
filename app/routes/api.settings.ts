@@ -1,7 +1,7 @@
 import { verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.settings";
 import { cloudflareContext } from "../cloudflare-context";
-import { getAuditActor, getContributorSetup, getLocalContributorName } from "../audit.server";
+import { getAuditActor, getContributorSetup, getLocalContributorName, getLocalContributorSession } from "../audit.server";
 
 type SettingsEnv = Env & { SCOUTING_DB?: D1Database };
 type CompatibilityWeights = {
@@ -25,6 +25,9 @@ type PersonalSettings = {
 	teamNumber: 5837;
 	ftcTeamNumber: 7247 | 5445;
 	teamPreset: "SLB" | "FTC";
+	primaryLeague: "FTC" | "FRC";
+	primaryTeamNumber: string;
+	organizationTeams: { league: "FTC" | "FRC"; teamNumber: string }[];
 	theme: "dark" | "light";
 	shortcuts: DashboardShortcut[];
 };
@@ -42,6 +45,9 @@ const defaultPersonalSettings: PersonalSettings = {
 	teamNumber: 5837,
 	ftcTeamNumber: 7247,
 	teamPreset: "SLB",
+	primaryLeague: "FTC",
+	primaryTeamNumber: "7247",
+	organizationTeams: [],
 	theme: "dark",
 	shortcuts: [],
 };
@@ -115,23 +121,60 @@ async function readSettings(db: D1Database) {
 }
 
 async function readPersonalSettings(db: D1Database, userId: string): Promise<PersonalSettings> {
-	const row = await db.prepare("SELECT team_number, ftc_team_number, team_preset, theme, shortcuts FROM user_settings WHERE user_id = ?")
+	const [row, membership] = await Promise.all([
+		db.prepare("SELECT team_number, ftc_team_number, team_preset, primary_league, primary_team_number, theme, shortcuts FROM user_settings WHERE user_id = ?")
 		.bind(userId)
-		.first<{ team_number: number; ftc_team_number: number; team_preset: string; theme: string; shortcuts: string }>();
-	if (!row) return defaultPersonalSettings;
+		.first<{ team_number: number; ftc_team_number: number; team_preset: string; primary_league: string; primary_team_number: string; theme: string; shortcuts: string }>(),
+		db.prepare("SELECT organization_id FROM organization_memberships WHERE user_id = ?")
+			.bind(userId).first<{ organization_id: string }>(),
+	]);
+	const teams = membership
+		? await db.prepare("SELECT league, team_number FROM organization_teams WHERE organization_id = ? ORDER BY league, team_number")
+			.bind(membership.organization_id).all<{ league: "FTC" | "FRC"; team_number: string }>()
+		: { results: [] };
+	const organizationTeams = teams.results.map(({ league, team_number }) => ({ league, teamNumber: team_number }));
+	const defaultTeam = organizationTeams.find((team) => team.league === "FTC") || organizationTeams[0] || {
+		league: "FTC" as const,
+		teamNumber: defaultPersonalSettings.primaryTeamNumber,
+	};
+	if (!row) {
+		const isWaterloo = membership?.organization_id === "waterloo-robotics";
+		return {
+			...defaultPersonalSettings,
+			teamPreset: isWaterloo ? "SLB" : "FTC",
+			primaryLeague: defaultTeam.league,
+			primaryTeamNumber: defaultTeam.teamNumber,
+			organizationTeams,
+		};
+	}
 	let parsedShortcuts: unknown;
 	try {
 		parsedShortcuts = JSON.parse(row.shortcuts);
 	} catch {
 		parsedShortcuts = [];
 	}
-	const teamPreset: PersonalSettings["teamPreset"] = row.team_preset === "FTC" ? "FTC" : "SLB";
+	const primaryLeague: PersonalSettings["primaryLeague"] = row.primary_league === "FRC" ? "FRC" : "FTC";
+	const selectedTeamIsAvailable = organizationTeams.some((team) =>
+		team.league === primaryLeague && team.teamNumber === row.primary_team_number
+	);
+	const selectedTeam = selectedTeamIsAvailable
+		? { league: primaryLeague, teamNumber: row.primary_team_number }
+		: defaultTeam;
+	const hasWaterlooTeams = ["FRC:5837", "FTC:7247", "FTC:5445"].every((teamKey) =>
+		organizationTeams.some((team) => `${team.league}:${team.teamNumber}` === teamKey)
+	);
+	const teamPreset: PersonalSettings["teamPreset"] =
+		row.team_preset === "SLB" && membership?.organization_id === "waterloo-robotics" && hasWaterlooTeams ? "SLB" : "FTC";
+	const selectedFtcTeamNumber = Number(selectedTeam.teamNumber);
 	return {
 		teamNumber: 5837,
-		ftcTeamNumber: teamPreset === "SLB"
-			? 7247
+		ftcTeamNumber: selectedTeam.league === "FTC" && isValidFtcTeamNumber(selectedFtcTeamNumber)
+			? selectedFtcTeamNumber
 			: isValidFtcTeamNumber(row.ftc_team_number) ? row.ftc_team_number : defaultPersonalSettings.ftcTeamNumber,
 		teamPreset,
+		primaryLeague: selectedTeam.league,
+		primaryTeamNumber: selectedTeam.teamNumber,
+		organizationTeams,
 		theme: row.theme === "light" ? "light" : "dark",
 		shortcuts: parseShortcuts(parsedShortcuts) || [],
 	};
@@ -139,15 +182,31 @@ async function readPersonalSettings(db: D1Database, userId: string): Promise<Per
 
 async function readAccountPersonalSettings(env: SettingsEnv, userId: string) {
 	if (!env.SCOUTING_DB) throw new Error("Shared scouting storage is not configured.");
-	const [personal, contributor] = await Promise.all([
+	const [loadedPersonal, contributor] = await Promise.all([
 		readPersonalSettings(env.SCOUTING_DB, userId),
 		getContributorSetup(env, userId),
 	]);
+	let personal = loadedPersonal;
+	if (contributor.kiosk) {
+		const defaultTeam = personal.organizationTeams.find((team) => team.league === "FTC") || personal.organizationTeams[0];
+		if (defaultTeam) {
+			personal = {
+				...personal,
+				teamPreset: "FTC",
+				primaryLeague: defaultTeam.league,
+				primaryTeamNumber: defaultTeam.teamNumber,
+				ftcTeamNumber: defaultTeam.league === "FTC" && isValidFtcTeamNumber(Number(defaultTeam.teamNumber))
+					? Number(defaultTeam.teamNumber)
+					: personal.ftcTeamNumber,
+			};
+		}
+	}
 	return {
-		personal: contributor.required
-			? { ...personal, teamNumber: 5837 as const, ftcTeamNumber: 7247 as const, teamPreset: "SLB" as const }
+		personal: contributor.required && !contributor.kiosk
+			? { ...personal, teamNumber: 5837 as const, ftcTeamNumber: 7247 as const, teamPreset: "SLB" as const, primaryLeague: "FTC" as const, primaryTeamNumber: "7247" }
 			: personal,
 		teamSelectionLocked: contributor.required,
+		kiosk: contributor.kiosk,
 	};
 }
 
@@ -160,7 +219,8 @@ export async function loader({ request, context }: Route.LoaderArgs) {
 	try {
 		if (new URL(request.url).searchParams.get("scope") === "contributor") {
 			const setup = await getContributorSetup(env, session.sub);
-			return json({ contributor: { ...setup, name: setup.required ? getLocalContributorName(request) : null } });
+			const localSession = setup.required ? getLocalContributorSession(request) : { name: null, expiresAt: null };
+			return json({ contributor: { ...setup, ...localSession } });
 		}
 		const accountSettings = await readAccountPersonalSettings(env, session.sub);
 		if (new URL(request.url).searchParams.get("scope") === "personal") return json(accountSettings);
@@ -182,7 +242,15 @@ export async function action({ request, context }: Route.ActionArgs) {
 		action?: unknown;
 		contributorName?: unknown;
 		weights?: unknown;
-		personal?: { teamNumber?: unknown; ftcTeamNumber?: unknown; teamPreset?: unknown; theme?: unknown; shortcuts?: unknown };
+		personal?: {
+			teamNumber?: unknown;
+			ftcTeamNumber?: unknown;
+			teamPreset?: unknown;
+			primaryLeague?: unknown;
+			primaryTeamNumber?: unknown;
+			theme?: unknown;
+			shortcuts?: unknown;
+		};
 	};
 	try {
 		body = await request.json() as typeof body;
@@ -192,43 +260,72 @@ export async function action({ request, context }: Route.ActionArgs) {
 	if (body.action === "contributor-name") {
 		if (typeof body.contributorName !== "string") return json({ error: "Enter a credited name." }, 400);
 		const name = body.contributorName.trim();
-		if (!name || name.length > 12 || /[\r\n\0]/.test(name)) return json({ error: "Enter a name from 1 to 12 characters." }, 400);
+		if (!name || name.length > 80 || /[\r\n\0]/.test(name)) return json({ error: "Enter a name from 1 to 80 characters." }, 400);
 		try {
 			const setup = await getContributorSetup(env, session.sub);
-			if (!setup.required) return json({ error: "Credited names are only available for the designated account." }, 403);
+			if (!setup.required) return json({ error: "Credited names are only available for kiosk accounts and the designated account." }, 403);
+			const expiresInSeconds = setup.kiosk ? 3600 : 31_536_000;
+			const expiresAtMs = Date.now() + expiresInSeconds * 1000;
+			const expiresAt = new Date(expiresAtMs).toISOString();
 			const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-			return new Response(JSON.stringify({ contributor: { required: true, name, expiresAt: null } }), {
-				headers: {
-					"cache-control": "private, no-store",
-					"content-type": "application/json",
-					"set-cookie": `scouting-contributor-name=${encodeURIComponent(name)}; Path=/; Max-Age=31536000; SameSite=Lax${secure}`,
-				},
+			const headers = new Headers({
+				"cache-control": "private, no-store",
+				"content-type": "application/json",
 			});
+			headers.append("set-cookie", `scouting-contributor-name=${encodeURIComponent(name)}; Path=/; Max-Age=${expiresInSeconds}; SameSite=Lax${secure}`);
+			headers.append("set-cookie", `scouting-contributor-expires-at=${expiresAtMs}; Path=/; Max-Age=${expiresInSeconds}; SameSite=Lax${secure}`);
+			return new Response(JSON.stringify({ contributor: { required: true, kiosk: setup.kiosk, name, expiresAt } }), { headers });
 		} catch (error) {
 			console.error(JSON.stringify({ message: "Could not save contributor name", error: error instanceof Error ? error.message : String(error) }));
 			return json({ error: "Could not save your credited name." }, 503);
 		}
 	}
 	if (body.personal) {
-		const { teamNumber, ftcTeamNumber, teamPreset, theme } = body.personal;
-		let teamSelectionLocked = false;
+		const { teamNumber, ftcTeamNumber, teamPreset, primaryLeague, primaryTeamNumber, theme } = body.personal;
+		let contributorSetup: Awaited<ReturnType<typeof getContributorSetup>>;
 		try {
-			teamSelectionLocked = (await getContributorSetup(env, session.sub)).required;
+			contributorSetup = await getContributorSetup(env, session.sub);
 		} catch (error) {
 			console.error(JSON.stringify({ message: "Could not verify account team settings", error: error instanceof Error ? error.message : String(error) }));
 			return json({ error: "Could not verify your account team settings." }, 503);
 		}
+		let membership: { organization_id: string } | null;
+		let organizationTeams: { results: { league: "FTC" | "FRC"; team_number: string }[] };
+		try {
+			membership = await env.SCOUTING_DB.prepare(`SELECT o.id AS organization_id FROM organization_memberships m
+				JOIN organizations o ON o.id = m.organization_id WHERE m.user_id = ?`)
+				.bind(session.sub).first<{ organization_id: string }>();
+			organizationTeams = membership
+				? await env.SCOUTING_DB.prepare("SELECT league, team_number FROM organization_teams WHERE organization_id = ? ORDER BY league, team_number")
+					.bind(membership.organization_id).all<{ league: "FTC" | "FRC"; team_number: string }>()
+				: { results: [] };
+		} catch (error) {
+			console.error(JSON.stringify({ message: "Could not verify organization team settings", error: error instanceof Error ? error.message : String(error) }));
+			return json({ error: "Could not verify your organization teams." }, 503);
+		}
+		const selectedTeamExists = typeof primaryLeague === "string" && typeof primaryTeamNumber === "string" &&
+			organizationTeams.results.some((team) => team.league === primaryLeague && team.team_number === primaryTeamNumber);
+		const hasWaterlooTeams = ["FRC:5837", "FTC:7247", "FTC:5445"].every((teamKey) =>
+			organizationTeams.results.some((team) => `${team.league}:${team.team_number}` === teamKey)
+		);
 		if (
 			teamNumber !== 5837 ||
 			typeof ftcTeamNumber !== "number" ||
-			!isValidFtcTeamNumber(ftcTeamNumber) ||
+			(!isValidFtcTeamNumber(ftcTeamNumber) && !(primaryLeague === "FTC" && primaryTeamNumber === String(ftcTeamNumber))) ||
 			(teamPreset !== "SLB" && teamPreset !== "FTC") ||
-			(teamPreset === "SLB" && ftcTeamNumber !== 7247) ||
+			(primaryLeague !== "FTC" && primaryLeague !== "FRC") ||
+			!selectedTeamExists ||
+			(teamPreset === "SLB" && (membership?.organization_id !== "waterloo-robotics" || !hasWaterlooTeams || primaryLeague !== "FTC" || primaryTeamNumber !== "7247")) ||
 			(theme !== "dark" && theme !== "light")
 		) {
 			return json({ error: "Choose a valid team and theme." }, 400);
 		}
-		if (teamSelectionLocked && (teamPreset !== "SLB" || ftcTeamNumber !== 7247)) {
+		if (contributorSetup.kiosk) {
+			const kioskTeam = organizationTeams.results.find((team) => team.league === "FTC") || organizationTeams.results[0];
+			if (!kioskTeam || teamPreset !== "FTC" || primaryLeague !== kioskTeam.league || primaryTeamNumber !== kioskTeam.team_number) {
+				return json({ error: "Kiosk accounts are assigned to every team in their organization and cannot change their dashboard team." }, 403);
+			}
+		} else if (contributorSetup.required && (teamPreset !== "SLB" || primaryLeague !== "FTC" || primaryTeamNumber !== "7247")) {
 			return json({ error: "This account's team membership is locked to FRC 5837 and FTC 7247 + 5445." }, 403);
 		}
 		try {
@@ -236,11 +333,17 @@ export async function action({ request, context }: Route.ActionArgs) {
 				? (await readPersonalSettings(env.SCOUTING_DB, session.sub)).shortcuts
 				: parseShortcuts(body.personal.shortcuts);
 			if (!shortcuts) return json({ error: "Add up to 12 valid dashboard shortcuts." }, 400);
-			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings (user_id, team_number, ftc_team_number, team_preset, theme, shortcuts, updated_at)
-				VALUES (?, 5837, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			const legacyFtcTeam = isValidFtcTeamNumber(Number(primaryTeamNumber)) && primaryLeague === "FTC"
+				? Number(primaryTeamNumber)
+				: isValidFtcTeamNumber(ftcTeamNumber) ? ftcTeamNumber : defaultPersonalSettings.ftcTeamNumber;
+			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings
+				(user_id, team_number, ftc_team_number, team_preset, primary_league, primary_team_number, theme, shortcuts, updated_at)
+				VALUES (?, 5837, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(user_id) DO UPDATE SET team_number = 5837, ftc_team_number = excluded.ftc_team_number,
-				team_preset = excluded.team_preset, theme = excluded.theme, shortcuts = excluded.shortcuts, updated_at = excluded.updated_at`)
-				.bind(session.sub, ftcTeamNumber, teamPreset, theme, JSON.stringify(shortcuts))
+				team_preset = excluded.team_preset, primary_league = excluded.primary_league,
+				primary_team_number = excluded.primary_team_number, theme = excluded.theme,
+				shortcuts = excluded.shortcuts, updated_at = excluded.updated_at`)
+				.bind(session.sub, legacyFtcTeam, teamPreset, primaryLeague, primaryTeamNumber, theme, JSON.stringify(shortcuts))
 				.run();
 			return json(await readAccountPersonalSettings(env, session.sub));
 		} catch (error) {

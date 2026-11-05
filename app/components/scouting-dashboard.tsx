@@ -2,7 +2,7 @@ import { useAuth, useUser } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import { ScoreTrendChart, type EventPerformance } from "./score-trend-chart";
 import { TopNavigation } from "./top-navigation";
-import { readContributorName, saveContributorName as saveLocalContributorName } from "../contributor.client";
+import { saveContributorName as saveLocalContributorName } from "../contributor.client";
 import { readRecentPages, subscribeToRecentPages, type RecentPage } from "../recent-pages.client";
 
 type League = "FTC" | "FRC";
@@ -20,10 +20,13 @@ type PersonalSettings = {
 	teamNumber: 5837;
 	ftcTeamNumber: 7247 | 5445;
 	teamPreset: "SLB" | "FTC";
+	primaryLeague: League;
+	primaryTeamNumber: string;
+	organizationTeams: { league: League; teamNumber: string }[];
 	theme: "dark" | "light";
 	shortcuts: DashboardShortcut[];
 };
-type ContributorSession = { required: boolean; name: string | null; expiresAt: string | null };
+type ContributorSession = { required: boolean; kiosk: boolean; name: string | null; expiresAt: string | null };
 type TeamData = {
 	teamNumber: string;
 	events: RecordValue | RecordValue[] | null;
@@ -178,7 +181,10 @@ function shortcutHref(shortcut: DashboardShortcut) {
 export function ScoutingDashboard() {
 	const { getToken } = useAuth();
 	const { user } = useUser();
-	const [personal, setPersonal] = useState<PersonalSettings>({ teamNumber: 5837, ftcTeamNumber: 7247, teamPreset: "SLB", theme: "dark", shortcuts: [] });
+	const [personal, setPersonal] = useState<PersonalSettings>({
+		teamNumber: 5837, ftcTeamNumber: 7247, teamPreset: "SLB", primaryLeague: "FTC", primaryTeamNumber: "7247",
+		organizationTeams: [], theme: "dark", shortcuts: [],
+	});
 	const [team, setTeam] = useState<TeamData | null>(null);
 	const [frcTeam, setFrcTeam] = useState<TeamData | null>(null);
 	const [secondFtcTeam, setSecondFtcTeam] = useState<TeamData | null>(null);
@@ -203,7 +209,7 @@ export function ScoutingDashboard() {
 	const [shortcutTeam, setShortcutTeam] = useState("");
 	const [shortcutEvent, setShortcutEvent] = useState("");
 	const [savingShortcut, setSavingShortcut] = useState(false);
-	const [contributor, setContributor] = useState<ContributorSession>({ required: false, name: null, expiresAt: null });
+	const [contributor, setContributor] = useState<ContributorSession>({ required: false, kiosk: false, name: null, expiresAt: null });
 	const [showContributorEditor, setShowContributorEditor] = useState(false);
 	const [contributorDraft, setContributorDraft] = useState("");
 	const [savingContributor, setSavingContributor] = useState(false);
@@ -233,11 +239,10 @@ export function ScoutingDashboard() {
 				if (!contributorResponse.ok || !contributorData.contributor) throw new Error(contributorData.error || "Could not load your credited name.");
 				if (cancelled) return;
 				setPersonal(settingsData.personal);
-				const contributorName = contributorData.contributor.required ? readContributorName() : null;
-				setContributor({ ...contributorData.contributor, name: contributorName });
-				setContributorDraft(contributorName || "");
-				const number = String(settingsData.personal.ftcTeamNumber);
-				const teamResponseUrl = `/api/teams/${encodeURIComponent(number)}?${new URLSearchParams({ league: "ftc", season })}`;
+				setContributor(contributorData.contributor);
+				setContributorDraft(contributorData.contributor.name || "");
+				const number = settingsData.personal.primaryTeamNumber;
+				const teamResponseUrl = `/api/teams/${encodeURIComponent(number)}?${new URLSearchParams({ league: settingsData.personal.primaryLeague.toLowerCase(), season })}`;
 				const frcTeamResponseUrl = `/api/teams/5837?${new URLSearchParams({ league: "frc", season })}`;
 				const secondFtcTeamResponseUrl = `/api/teams/5445?${new URLSearchParams({ league: "ftc", season })}`;
 				const [teamResponse, frcTeamResponse, secondFtcTeamResult] = await Promise.all([
@@ -290,8 +295,8 @@ export function ScoutingDashboard() {
 		return () => { cancelled = true; };
 	}, [getToken]);
 
-	const teamNumber = String(personal.ftcTeamNumber);
-	const league: League = "FTC";
+	const teamNumber = personal.primaryTeamNumber;
+	const league = personal.primaryLeague;
 	const events = team ? eventRecords(team, league) : [];
 	const frcEvents = frcTeam ? eventRecords(frcTeam, "FRC") : [];
 	const currentRobots = team?.robots.filter((robot) => !robot.endMonth) || [];
@@ -301,7 +306,7 @@ export function ScoutingDashboard() {
 	const currentEvent = activeEvent(events);
 	const upcomingEvents = events.filter((event) => !event.end || event.end.slice(0, 10) >= new Date().toISOString().slice(0, 10)).slice(0, 5);
 	const dashboardEvents = [
-		...events.map((event) => ({ ...event, league: "FTC" as const, teamNumbers: [teamNumber] })),
+		...events.map((event) => ({ ...event, league, teamNumbers: [teamNumber] })),
 		...(personal.teamPreset === "SLB"
 			? secondFtcEvents.map((event) => ({ ...event, league: "FTC" as const, teamNumbers: ["5445"] }))
 			: []),
@@ -425,8 +430,16 @@ export function ScoutingDashboard() {
 		setSavingContributor(true);
 		setError("");
 		try {
-			const name = saveLocalContributorName(contributorDraft);
-			setContributor((current) => ({ ...current, name }));
+			const token = await getToken();
+			const response = await fetch("/api/settings", {
+				method: "PUT",
+				headers: { "content-type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+				body: JSON.stringify({ action: "contributor-name", contributorName: contributorDraft }),
+			});
+			const data = await readResponse<{ contributor?: ContributorSession; error?: string }>(response);
+			if (!response.ok || !data.contributor) throw new Error(data.error || "Could not save your credited name.");
+			const name = saveLocalContributorName(data.contributor.name, data.contributor.kiosk ? 3600 : 31_536_000, data.contributor.expiresAt ? Date.parse(data.contributor.expiresAt) : undefined);
+			setContributor(data.contributor);
 			setContributorDraft(name);
 			setShowContributorEditor(false);
 		} catch (saveError) {
@@ -483,19 +496,19 @@ export function ScoutingDashboard() {
 			<TopNavigation currentPage="dashboard" />
 			<div className="dashboard-page">
 				<header className="dashboard-heading">
-					<div><p className="section-kicker">{personal.teamPreset === "SLB" ? "FRC 5837 + FTC 7247 + FTC 5445" : `${league} ${teamNumber}`} · {season}-{String(Number(season) + 1).slice(-2)} season</p><h1>Welcome, {contributor.required ? contributor.name || "iPad" : user?.username || user?.firstName || "scout"}</h1>
-						{contributor.required && <button className="dashboard-contributor-edit" type="button" aria-expanded={showContributorEditor} onClick={() => setShowContributorEditor((current) => !current)}>{showContributorEditor ? "Cancel name change" : "Change iPad name"}</button>}
+					<div><p className="section-kicker">{contributor.kiosk ? "Team kiosk · assigned to all organization teams" : personal.teamPreset === "SLB" ? "FRC 5837 + FTC 7247 + FTC 5445" : `${league} ${teamNumber}`} · {season}-{String(Number(season) + 1).slice(-2)} season</p><h1>Welcome, {contributor.required ? contributor.name || "scout" : user?.username || user?.firstName || "scout"}</h1>
+						{contributor.required && <button className="dashboard-contributor-edit" type="button" aria-expanded={showContributorEditor} onClick={() => setShowContributorEditor((current) => !current)}>{showContributorEditor ? "Cancel name change" : contributor.kiosk ? "Change user name" : "Change iPad name"}</button>}
 					</div>
 					<div className="dashboard-heading-actions">
-						<a className="dashboard-team-link" href={`/home?${new URLSearchParams({ team: teamNumber, league, season })}`}>Team {teamNumber}<span aria-hidden="true">↗</span></a>
-						{personal.teamPreset === "SLB" && <a className="dashboard-team-link" href={`/home?${new URLSearchParams({ team: "5837", league: "FRC", season })}`}>FRC 5837<span aria-hidden="true">↗</span></a>}
-						{personal.teamPreset === "SLB" && <a className="dashboard-team-link" href={`/home?${new URLSearchParams({ team: "5445", league: "FTC", season })}`}>FTC 5445<span aria-hidden="true">↗</span></a>}
+						{personal.organizationTeams.map((organizationTeam) => <a className="dashboard-team-link" href={`/home?${new URLSearchParams({ team: organizationTeam.teamNumber, league: organizationTeam.league, season })}`} key={`${organizationTeam.league}:${organizationTeam.teamNumber}`}>
+							{organizationTeam.league} {organizationTeam.teamNumber}<span aria-hidden="true">↗</span>
+						</a>)}
 					</div>
 				</header>
 				{showContributorEditor && <form className="dashboard-contributor-form" onSubmit={(event) => void saveContributorName(event)}>
-					<label htmlFor="dashboard-contributor-name">Name credited for this iPad</label>
-					<input id="dashboard-contributor-name" value={contributorDraft} onChange={(event) => setContributorDraft(event.target.value)} maxLength={12} autoComplete="off" required />
-					<button className="search-button" type="submit" disabled={savingContributor || !contributorDraft.trim()}>{savingContributor ? "Saving..." : "Save iPad name"}</button>
+					<label htmlFor="dashboard-contributor-name">{contributor.kiosk ? "Name credited for the next hour" : "Name credited for this device"}</label>
+					<input id="dashboard-contributor-name" value={contributorDraft} onChange={(event) => setContributorDraft(event.target.value)} maxLength={80} autoComplete="name" required />
+					<button className="search-button" type="submit" disabled={savingContributor || !contributorDraft.trim()}>{savingContributor ? "Saving..." : contributor.kiosk ? "Save user name" : "Save iPad name"}</button>
 				</form>}
 				{error && <p className="lookup-error" role="alert">{error}</p>}
 				{loading ? <p className="dashboard-status" aria-busy="true">Loading your team dashboard...</p> : <div className="dashboard-grid">
@@ -533,16 +546,16 @@ export function ScoutingDashboard() {
 					</section>
 					<section className="dashboard-tile dashboard-matches-tile" aria-labelledby="dashboard-matches-title">
 						<header className="dashboard-tile-heading"><div><h2 id="dashboard-matches-title">Next matches</h2></div></header>
-						{isLoadingSchedule ? <p className="dashboard-empty" aria-busy="true">Loading FTC {teamNumber}'s next match...</p>
+						{isLoadingSchedule ? <p className="dashboard-empty" aria-busy="true">Loading {league} {teamNumber}'s next match...</p>
 							: scheduleError ? <p className="dashboard-empty">{scheduleError}</p>
-								: nextMatch && scheduleEvent ? <NextMatchCard event={scheduleEvent} match={nextMatch} teamNumber={teamNumber} winProbability={winProbability} favoriteTeams={personal.teamPreset === "SLB" ? ["7247", "5445"] : [teamNumber]} />
-									: <p className="dashboard-empty">{scheduleEvent ? `No upcoming qualification for FTC ${teamNumber}.` : "No current or recent FTC event is available."}</p>}
+								: nextMatch && scheduleEvent ? <NextMatchCard event={scheduleEvent} match={nextMatch} teamNumber={teamNumber} league={league} winProbability={winProbability} favoriteTeams={personal.teamPreset === "SLB" ? ["7247", "5445"] : [teamNumber]} />
+									: <p className="dashboard-empty">{scheduleEvent ? `No upcoming qualification for ${league} ${teamNumber}.` : `No current or recent ${league} event is available.`}</p>}
 						{personal.teamPreset === "SLB" && <div className="dashboard-second-team-match">
 							{isLoadingSecondFtcSchedule ? <p className="dashboard-empty" aria-busy="true">Loading FTC 5445's next match...</p>
 								: secondFtcTeamError ? <p className="dashboard-empty" role="alert">{secondFtcTeamError}</p>
 									: secondFtcScheduleError ? <p className="dashboard-empty" role="alert">{secondFtcScheduleError}</p>
 										: secondFtcNextMatch && secondFtcScheduleEvent
-											? <NextMatchCard event={secondFtcScheduleEvent} match={secondFtcNextMatch} teamNumber="5445" winProbability={secondFtcWinProbability} favoriteTeams={["7247", "5445"]} />
+											? <NextMatchCard event={secondFtcScheduleEvent} match={secondFtcNextMatch} teamNumber="5445" league="FTC" winProbability={secondFtcWinProbability} favoriteTeams={["7247", "5445"]} />
 											: <p className="dashboard-empty">{secondFtcScheduleEvent ? "No upcoming qualification for FTC 5445." : "No current or upcoming FTC event is listed for team 5445."}</p>}
 						</div>}
 					</section>
@@ -603,10 +616,11 @@ export function ScoutingDashboard() {
 	);
 }
 
-function NextMatchCard({ event, match, teamNumber, winProbability, favoriteTeams }: {
+function NextMatchCard({ event, match, teamNumber, league, winProbability, favoriteTeams }: {
 	event: EventLink;
 	match: ScheduleMatch;
 	teamNumber: string;
+	league: League;
 	winProbability: number | null;
 	favoriteTeams: string[];
 }) {
@@ -619,7 +633,7 @@ function NextMatchCard({ event, match, teamNumber, winProbability, favoriteTeams
 		if (!teams.length) return <small>Teams unavailable</small>;
 		return teams.map((number) => <a
 			key={number}
-			href={`/home?${new URLSearchParams({ team: number, league: "FTC", season })}`}
+			href={`/home?${new URLSearchParams({ team: number, league, season })}`}
 			className={favoriteTeams.includes(number) ? "dashboard-match-team-featured" : undefined}
 		>
 			{favoriteTeams.includes(number) ? <strong>{number}</strong> : number}
@@ -628,8 +642,8 @@ function NextMatchCard({ event, match, teamNumber, winProbability, favoriteTeams
 
 	return <article className="dashboard-next-match-card">
 		<header className="dashboard-next-match-heading">
-			<div><p className="section-kicker">FTC {teamNumber} · {event.name}</p>
-				<a className="dashboard-next-match-link" href={eventHref(event, "FTC", teamNumber, match.matchKey)}>
+			<div><p className="section-kicker">{league} {teamNumber} · {event.name}</p>
+				<a className="dashboard-next-match-link" href={eventHref(event, league, teamNumber, match.matchKey)}>
 					<strong>Qualification {match.qualificationNumber}</strong>
 					<time>{scheduledTime?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "Time TBD"}</time>
 				</a>

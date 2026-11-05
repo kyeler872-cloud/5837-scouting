@@ -7,36 +7,52 @@ export type AuditActor = {
 };
 
 export const CONTRIBUTOR_EMAIL = "frcteam5837@gmail.com";
-export const NOTE_ADMIN_EMAIL = "kyeler872@gmail.com";
+export const NOTE_ADMIN_EMAIL = "kyelerw@icloud.com";
+const CONTRIBUTOR_NAME_COOKIE = "scouting-contributor-name";
+const CONTRIBUTOR_EXPIRY_COOKIE = "scouting-contributor-expires-at";
+type ContributorEnv = Env & { SCOUTING_DB?: D1Database };
 
 export function validateContributorName(value: string | null | undefined) {
 	const name = value?.trim() || "";
-	if (!name || name.length > 12 || /[\r\n\0]/.test(name)) {
+	if (!name || name.length > 80 || /[\r\n\0]/.test(name)) {
 		throw new Error("Choose a valid local credited name before contributing.");
 	}
 	return name;
 }
 
-export function getLocalContributorName(request: Request) {
-	const cookie = request.headers.get("Cookie");
-	const value = cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith("scouting-contributor-name="))
-		?.slice("scouting-contributor-name=".length);
-	if (value === undefined) {
-		const headerName = request.headers.get("X-Contributor-Name");
-		return headerName === null ? null : validateContributorName(headerName);
+export function getLocalContributorSession(request: Request) {
+	const cookies = new Map((request.headers.get("Cookie") || "").split(";").map((part) => {
+		const separator = part.indexOf("=");
+		return separator < 0 ? ["", ""] : [part.slice(0, separator).trim(), part.slice(separator + 1).trim()];
+	}));
+	const value = cookies.get(CONTRIBUTOR_NAME_COOKIE);
+	const expiresAt = Number(cookies.get(CONTRIBUTOR_EXPIRY_COOKIE));
+	if (value === undefined || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+		return { name: null, expiresAt: null };
 	}
 	try {
-		return validateContributorName(decodeURIComponent(value));
+		return { name: validateContributorName(decodeURIComponent(value)), expiresAt: new Date(expiresAt).toISOString() };
 	} catch {
-		throw new Error("The local credited name cookie is invalid. Update the iPad name and try again.");
+		return { name: null, expiresAt: null };
 	}
 }
 
-export async function getContributorSetup(env: Env, userId: string) {
+export function getLocalContributorName(request: Request) {
+	return getLocalContributorSession(request).name;
+}
+
+export async function getContributorSetup(env: ContributorEnv, userId: string) {
 	if (!env.CLERK_SECRET_KEY) throw new Error("Server authentication is not configured.");
-	const user = await createClerkClient({ secretKey: env.CLERK_SECRET_KEY }).users.getUser(userId);
+	const [user, membership] = await Promise.all([
+		createClerkClient({ secretKey: env.CLERK_SECRET_KEY }).users.getUser(userId),
+		env.SCOUTING_DB
+			? env.SCOUTING_DB.prepare("SELECT role FROM organization_memberships WHERE user_id = ?")
+				.bind(userId).first<{ role: string }>()
+			: Promise.resolve(null),
+	]);
 	const email = user.primaryEmailAddress?.emailAddress?.trim().toLowerCase() || null;
-	return { required: email === CONTRIBUTOR_EMAIL, name: null, expiresAt: null };
+	const kiosk = membership?.role === "kiosk";
+	return { required: kiosk || email === CONTRIBUTOR_EMAIL, kiosk, name: null, expiresAt: null };
 }
 
 export function resolveAccountName(
@@ -44,8 +60,9 @@ export function resolveAccountName(
 	defaultName: string,
 	contributorName?: string | null,
 	requireContributorName = false,
+	forceContributorName = false,
 ) {
-	if (email !== CONTRIBUTOR_EMAIL) return defaultName;
+	if (email !== CONTRIBUTOR_EMAIL && !forceContributorName) return defaultName;
 	return requireContributorName ? validateContributorName(contributorName) : defaultName;
 }
 
@@ -58,10 +75,15 @@ export async function getAuditActor(
 	if (!env.CLERK_SECRET_KEY) throw new Error("Server authentication is not configured.");
 	const user = await createClerkClient({ secretKey: env.CLERK_SECRET_KEY }).users.getUser(userId);
 	const email = user.primaryEmailAddress?.emailAddress?.trim().toLowerCase() || null;
+	const membership = env.SCOUTING_DB
+		? await env.SCOUTING_DB.prepare("SELECT role FROM organization_memberships WHERE user_id = ?")
+			.bind(userId).first<{ role: string }>()
+		: null;
 	const defaultName = user.fullName?.trim() || user.username?.trim() || "Unknown account";
+	const kiosk = membership?.role === "kiosk";
 	return {
 		userId,
-		accountName: resolveAccountName(email, defaultName, contributorName, requireContributorName),
+		accountName: resolveAccountName(email, defaultName, contributorName, requireContributorName, kiosk),
 		email,
 	};
 }

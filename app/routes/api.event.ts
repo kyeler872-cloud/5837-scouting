@@ -1,6 +1,7 @@
 import { verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.event";
 import { cloudflareContext } from "../cloudflare-context";
+import { getOrganizationMembership } from "../organizations.server";
 import { auditStatement, getAuditActor, getLocalContributorName, NOTE_ADMIN_EMAIL, type AuditActor } from "../audit.server";
 
 type League = "FTC" | "FRC";
@@ -338,11 +339,17 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const session = await authenticate(request, env);
 	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
+	const organization = await getOrganizationMembership(env.SCOUTING_DB, session.sub);
+	if (!organization) return json({ error: "Join an organization before accessing scouting notes." }, 403);
+	const organizationId = organization.organization_id;
 
 	const league = params.league?.toUpperCase();
 	const season = params.season || "";
 	const eventCode = params.eventCode || "";
 	if (league !== "FTC" && league !== "FRC") return json({ error: "Choose FTC or FRC." }, 400);
+	const enabledLeague = await env.SCOUTING_DB.prepare("SELECT team_number FROM organization_teams WHERE organization_id = ? AND league = ? LIMIT 1")
+		.bind(organizationId, league).first<{ team_number: string }>();
+	if (!enabledLeague) return json({ error: `${league} scouting is not enabled for your organization.` }, 403);
 	if (!/^\d{4}$/.test(season) || Number(season) < 1992 || Number(season) > 2100) return json({ error: "Choose a valid season." }, 400);
 	if (!/^[a-zA-Z0-9_-]{1,120}$/.test(eventCode)) return json({ error: "Invalid event code." }, 400);
 	let actor: AuditActor;
@@ -441,8 +448,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 
 	const matches = custom ? [] : qualificationMatches(scheduleData, league);
 	const [notes, assets, manualTeams, compatibilityRow, robotRows] = await Promise.all([
-		env.SCOUTING_DB.prepare("SELECT category, note, updated_by_account_name FROM event_notes WHERE league = ? AND season = ? AND event_code = ?")
-			.bind(league, season, eventCode).all<{ category: string; note: string; updated_by_account_name: string }>(),
+		env.SCOUTING_DB.prepare("SELECT category, note, updated_by_account_name FROM event_notes WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ?")
+			.bind(organizationId, league, season, eventCode).all<{ category: string; note: string; updated_by_account_name: string }>(),
 		env.SCOUTING_DB.prepare("SELECT photos_url FROM event_assets WHERE league = ? AND season = ? AND event_code = ?")
 			.bind(league, season, eventCode).first<{ photos_url: string }>(),
 		env.SCOUTING_DB.prepare("SELECT team_number, team_name FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? ORDER BY team_number")
@@ -456,8 +463,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	let matchNotesMigrationPending = false;
 	try {
 		matchNotes = await env.SCOUTING_DB.prepare(`SELECT id, match_key, phase, note, contributor_id, contributor_name
-			FROM event_match_scouting_notes WHERE league = ? AND season = ? AND event_code = ? ORDER BY created_at, id`)
-			.bind(league, season, eventCode).all<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string; contributor_name: string }>();
+			FROM event_match_scouting_notes WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? ORDER BY created_at, id`)
+			.bind(organizationId, league, season, eventCode).all<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string; contributor_name: string }>();
 	} catch (error) {
 		if (!(error instanceof Error) || !/no such table:\s*event_match_scouting_notes/i.test(error.message)) throw error;
 		matchNotesMigrationPending = true;
@@ -466,8 +473,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 			migration: "0019_event_match_note_entries.sql",
 		}));
 		const legacyNotes = await env.SCOUTING_DB.prepare(`SELECT match_key, phase, note, updated_by_account_name
-			FROM event_match_scouting WHERE league = ? AND season = ? AND event_code = ? ORDER BY updated_at, match_key, phase`)
-			.bind(league, season, eventCode)
+			FROM event_match_scouting WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? ORDER BY updated_at, match_key, phase`)
+			.bind(organizationId, league, season, eventCode)
 			.all<{ match_key: string; phase: MatchPhase; note: string; updated_by_account_name: string }>();
 		matchNotes = {
 			results: legacyNotes.results.filter((item) => item.note.trim()).map((item) => ({
@@ -608,6 +615,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	const session = await authenticate(request, env);
 	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
+	const organization = await getOrganizationMembership(env.SCOUTING_DB, session.sub);
+	if (!organization) return json({ error: "Join an organization before adding scouting notes." }, 403);
+	const organizationId = organization.organization_id;
 
 	const league = params.league?.toUpperCase();
 	const season = params.season || "";
@@ -615,6 +625,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if ((league !== "FTC" && league !== "FRC") || !/^\d{4}$/.test(season) || !/^[a-zA-Z0-9_-]{1,120}$/.test(eventCode)) {
 		return json({ error: "Invalid event." }, 400);
 	}
+	const enabledLeague = await env.SCOUTING_DB.prepare("SELECT team_number FROM organization_teams WHERE organization_id = ? AND league = ? LIMIT 1")
+		.bind(organizationId, league).first<{ team_number: string }>();
+	if (!enabledLeague) return json({ error: `${league} scouting is not enabled for your organization.` }, 403);
 	let body: {
 		action?: unknown;
 		category?: unknown;
@@ -683,9 +696,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 				const id = crypto.randomUUID();
 				statements.push(
 					env.SCOUTING_DB.prepare(`INSERT INTO event_match_scouting_notes
-						(id, league, season, event_code, match_key, phase, note, contributor_id, contributor_name)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-						.bind(id, league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
+						(id, league, season, event_code, match_key, phase, note, contributor_id, contributor_name, organization_id)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+						.bind(id, league, season, eventCode, body.matchKey, phase, note, session.sub, displayName, organizationId),
 					auditStatement(env.SCOUTING_DB, actor, "Added qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, null, note),
 				);
 				savedNotes[phase] = { id, value: note, displayName };
@@ -757,9 +770,9 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			const id = crypto.randomUUID();
 			await env.SCOUTING_DB.batch([
 				env.SCOUTING_DB.prepare(`INSERT INTO event_match_scouting_notes
-					(id, league, season, event_code, match_key, phase, note, contributor_id, contributor_name)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-					.bind(id, league, season, eventCode, body.matchKey, phase, note, session.sub, displayName),
+					(id, league, season, event_code, match_key, phase, note, contributor_id, contributor_name, organization_id)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					.bind(id, league, season, eventCode, body.matchKey, phase, note, session.sub, displayName, organizationId),
 				auditStatement(env.SCOUTING_DB, actor, "Added qualification scouting notes", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${phase}`, null, note),
 			]);
 			return json({ matchKey: body.matchKey, phase, note: { id, value: note, displayName, canDelete: true } });
@@ -770,8 +783,8 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			}
 			const note = await env.SCOUTING_DB.prepare(`SELECT id, match_key, phase, note, contributor_id
 				FROM event_match_scouting_notes
-				WHERE id = ? AND league = ? AND season = ? AND event_code = ?`)
-				.bind(body.noteId, league, season, eventCode)
+				WHERE id = ? AND organization_id = ? AND league = ? AND season = ? AND event_code = ?`)
+				.bind(body.noteId, organizationId, league, season, eventCode)
 				.first<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string }>();
 			if (!note) return json({ error: "Match note not found." }, 404);
 			if (note.contributor_id !== session.sub && actor.email !== NOTE_ADMIN_EMAIL) {
@@ -779,8 +792,8 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			}
 			await env.SCOUTING_DB.batch([
 				env.SCOUTING_DB.prepare(`DELETE FROM event_match_scouting_notes
-					WHERE id = ? AND league = ? AND season = ? AND event_code = ?`)
-					.bind(note.id, league, season, eventCode),
+					WHERE id = ? AND organization_id = ? AND league = ? AND season = ? AND event_code = ?`)
+					.bind(note.id, organizationId, league, season, eventCode),
 				auditStatement(env.SCOUTING_DB, actor, "Deleted qualification scouting note",
 					`${league} ${season} / ${eventCode} / ${note.match_key} / ${note.phase}`, note.note, null),
 			]);
@@ -789,13 +802,13 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		if (body.action === "note") {
 			if (typeof body.category !== "string" || !NOTE_CATEGORIES.includes(body.category as typeof NOTE_CATEGORIES[number])) return json({ error: "Choose a valid note category." }, 400);
 			if (typeof body.note !== "string" || body.note.length > 10000) return json({ error: "Notes must be 10,000 characters or fewer." }, 400);
-			const previous = await env.SCOUTING_DB.prepare("SELECT note FROM event_notes WHERE league = ? AND season = ? AND event_code = ? AND category = ?")
-				.bind(league, season, eventCode, body.category).first<{ note: string }>();
+			const previous = await env.SCOUTING_DB.prepare("SELECT note FROM event_notes WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND category = ?")
+				.bind(organizationId, league, season, eventCode, body.category).first<{ note: string }>();
 			await env.SCOUTING_DB.batch([
-				env.SCOUTING_DB.prepare(`INSERT INTO event_notes (league, season, event_code, category, note, updated_by, updated_by_account_name, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-				ON CONFLICT(league, season, event_code, category) DO UPDATE SET note = excluded.note, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-					.bind(league, season, eventCode, body.category, body.note.trim(), session.sub, displayName),
+				env.SCOUTING_DB.prepare(`INSERT INTO event_notes (organization_id, league, season, event_code, category, note, updated_by, updated_by_account_name, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				ON CONFLICT(organization_id, league, season, event_code, category) DO UPDATE SET note = excluded.note, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
+					.bind(organizationId, league, season, eventCode, body.category, body.note.trim(), session.sub, displayName),
 				auditStatement(env.SCOUTING_DB, actor, "Updated event notes", `${league} ${season} / ${eventCode}: ${body.category}`,
 					previous?.note ?? null, body.note.trim()),
 			]);

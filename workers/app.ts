@@ -8,6 +8,26 @@ const requestHandler = createRequestHandler(
 
 export default {
 	fetch(request, env, ctx) {
+		const url = new URL(request.url);
+		const isAdminHost = url.hostname === "admin.5837scout.app";
+		const normalizedPath = url.pathname.replace(/\/{2,}/g, "/");
+		if (normalizedPath !== url.pathname) {
+			url.pathname = normalizedPath;
+			return Response.redirect(url, 308);
+		}
+		if (!isAdminHost && (normalizedPath === "/admin" || normalizedPath.startsWith("/admin/"))) {
+			url.hostname = "admin.5837scout.app";
+			return Response.redirect(url, 308);
+		}
+		if (isAdminHost && normalizedPath === "/") {
+			url.pathname = "/admin";
+			return Response.redirect(url, 308);
+		}
+		if (isAdminHost && normalizedPath !== "/admin" && normalizedPath !== "/api/admin") {
+			url.hostname = "5837scout.app";
+			return Response.redirect(url, 308);
+		}
+
 		const loadContext = new RouterContextProvider();
 		loadContext.cloudflare = { env, ctx };
 		loadContext.set(cloudflareContext, { env, ctx });

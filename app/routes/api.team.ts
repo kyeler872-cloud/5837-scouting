@@ -1,6 +1,7 @@
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import type { Route } from "./+types/api.team";
 import { cloudflareContext } from "../cloudflare-context";
+import { getOrganizationMembership } from "../organizations.server";
 import { auditStatement, getAuditActor, getLocalContributorName, resolveAccountName, CONTRIBUTOR_EMAIL } from "../audit.server";
 
 type FtcEnv = Env & {
@@ -259,12 +260,12 @@ async function authenticate(request: Request, env: FtcEnv) {
 	}
 }
 
-async function getOverrides(db: D1Database | undefined, teamNumber: string, season: string) {
+async function getOverrides(db: D1Database | undefined, organizationId: string, teamNumber: string, season: string) {
 	if (!db || typeof db.prepare !== "function") return {};
 	try {
 		const result = await db
-			.prepare("SELECT field, value, updated_by, updated_by_first_name, updated_by_last_initial, updated_by_account_name FROM team_overrides WHERE team_number = ? AND season = ?")
-			.bind(teamNumber, season)
+			.prepare("SELECT field, value, updated_by, updated_by_first_name, updated_by_last_initial, updated_by_account_name FROM team_overrides WHERE organization_id = ? AND team_number = ? AND season = ?")
+			.bind(organizationId, teamNumber, season)
 			.all<{ field: string; value: string; updated_by: string; updated_by_first_name: string | null; updated_by_last_initial: string | null; updated_by_account_name: string | null }>();
 		return Object.fromEntries(result.results.map((row) => [row.field, {
 			value: row.value,
@@ -357,8 +358,12 @@ function formatDisplayName(firstName: string | null, lastInitial: string | null)
 async function getUserIdentity(env: FtcEnv, userId: string, contributorName: string | null) {
 	const user = await createClerkClient({ secretKey: env.CLERK_SECRET_KEY }).users.getUser(userId);
 	const email = user.primaryEmailAddress?.emailAddress?.trim().toLowerCase() || null;
-	const isContributor = email === CONTRIBUTOR_EMAIL;
-	const creditedName = resolveAccountName(email, user.fullName?.trim() || user.username?.trim() || "Unknown account", contributorName, true);
+	const membership = env.SCOUTING_DB
+		? await env.SCOUTING_DB.prepare("SELECT role FROM organization_memberships WHERE user_id = ?")
+			.bind(userId).first<{ role: string }>()
+		: null;
+	const isContributor = email === CONTRIBUTOR_EMAIL || membership?.role === "kiosk";
+	const creditedName = resolveAccountName(email, user.fullName?.trim() || user.username?.trim() || "Unknown account", contributorName, true, membership?.role === "kiosk");
 	const firstName = isContributor ? creditedName : user.firstName?.trim();
 	const lastName = isContributor ? "" : user.lastName?.trim();
 	if (!firstName || (!lastName && !isContributor)) throw new Error("Clerk first and last names are required.");
@@ -562,9 +567,11 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		return json({ error: "Server authentication is not configured." }, 503);
 	}
 
-	if (!await authenticate(request, env)) {
-		return json({ error: "Authentication required." }, 401);
-	}
+	const session = await authenticate(request, env);
+	if (!session) return json({ error: "Authentication required." }, 401);
+	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
+	const organization = await getOrganizationMembership(env.SCOUTING_DB, session.sub);
+	if (!organization) return json({ error: "Join an organization before accessing team settings." }, 403);
 
 	if (!league) return json({ error: "Choose FTC or FRC." }, 400);
 	if (league === "FTC" && !getFtcAuthorization(env)) {
@@ -577,6 +584,11 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) {
 		return json({ error: `Enter a valid ${league} team number.` }, 400);
 	}
+	const enabledTeam = await env.SCOUTING_DB.prepare(`SELECT team_number FROM organization_teams
+		WHERE organization_id = ? AND league = ? AND team_number = ?`)
+		.bind(organization.organization_id, league, teamNumber)
+		.first<{ team_number: string }>();
+	if (!enabledTeam) return json({ error: `${league} team ${teamNumber} is not enabled for your organization.` }, 403);
 
 	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
 	let teamProfile: Record<string, unknown> | null = null;
@@ -673,7 +685,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		events: eventsData,
 		awards: awardsData,
 		matches: matchesData,
-		overrides: await getOverrides(env.SCOUTING_DB, dbTeamNumber, season),
+		overrides: await getOverrides(env.SCOUTING_DB, organization.organization_id, dbTeamNumber, season),
 		selectedEvents: await getSelectedEvents(env.SCOUTING_DB, dbTeamNumber, season),
 		customEvents: await getCustomEvents(env.SCOUTING_DB, dbTeamNumber, season),
 		performance: { auto, teleop },
@@ -701,8 +713,16 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if (!env.SCOUTING_DB || typeof env.SCOUTING_DB.prepare !== "function") {
 		return json({ error: "Shared scouting storage is not configured." }, 503);
 	}
+	const organization = await getOrganizationMembership(env.SCOUTING_DB, session.sub);
+	if (!organization) return json({ error: "Join an organization before editing team settings." }, 403);
+	if (organization.role !== "mentor") return json({ error: "Only organization mentors can edit team settings." }, 403);
 	if (!league) return json({ error: "Choose FTC or FRC." }, 400);
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: `Enter a valid ${league} team number.` }, 400);
+	const enabledTeam = await env.SCOUTING_DB.prepare(`SELECT team_number FROM organization_teams
+		WHERE organization_id = ? AND league = ? AND team_number = ?`)
+		.bind(organization.organization_id, league, teamNumber)
+		.first<{ team_number: string }>();
+	if (!enabledTeam) return json({ error: `${league} team ${teamNumber} is not enabled for your organization.` }, 403);
 	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
 
 	let body: { field?: unknown; value?: unknown; socials?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown; scoringCapabilities?: unknown; auto?: unknown };
@@ -948,14 +968,14 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	const identity = await getUserIdentity(env, session.sub, getLocalContributorName(request));
 
 	try {
-		const previous = await env.SCOUTING_DB.prepare("SELECT value FROM team_overrides WHERE team_number = ? AND season = ? AND field = ?")
-			.bind(dbTeamNumber, season, body.field).first<{ value: string }>();
+		const previous = await env.SCOUTING_DB.prepare("SELECT value FROM team_overrides WHERE organization_id = ? AND team_number = ? AND season = ? AND field = ?")
+			.bind(organization.organization_id, dbTeamNumber, season, body.field).first<{ value: string }>();
 		await env.SCOUTING_DB.batch([
 			env.SCOUTING_DB
-				.prepare(`INSERT INTO team_overrides (team_number, season, field, value, updated_by, updated_by_first_name, updated_by_last_initial, updated_by_account_name, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-				ON CONFLICT(team_number, season, field) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_by_first_name = excluded.updated_by_first_name, updated_by_last_initial = excluded.updated_by_last_initial, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-				.bind(dbTeamNumber, season, body.field, body.value.trim(), session.sub, identity.firstName, identity.lastInitial, identity.accountName),
+				.prepare(`INSERT INTO team_overrides (organization_id, team_number, season, field, value, updated_by, updated_by_first_name, updated_by_last_initial, updated_by_account_name, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				ON CONFLICT(organization_id, team_number, season, field) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_by_first_name = excluded.updated_by_first_name, updated_by_last_initial = excluded.updated_by_last_initial, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
+				.bind(organization.organization_id, dbTeamNumber, season, body.field, body.value.trim(), session.sub, identity.firstName, identity.lastInitial, identity.accountName),
 			auditStatement(env.SCOUTING_DB, { userId: session.sub, accountName: identity.accountName, email: identity.email }, "Updated team notes",
 				`${league} ${teamNumber} / ${season}: ${body.field}`,
 				previous?.value ?? null, body.value.trim()),
@@ -964,5 +984,5 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		return json({ error: `Could not save edit: ${error instanceof Error ? error.message : "database error"}` }, 503);
 	}
 
-	return json({ overrides: await getOverrides(env.SCOUTING_DB, dbTeamNumber, season) });
+	return json({ overrides: await getOverrides(env.SCOUTING_DB, organization.organization_id, dbTeamNumber, season) });
 }

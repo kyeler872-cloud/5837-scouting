@@ -11,6 +11,16 @@
 		"crons": ["0 * * * *"]
 	},
 	"upload_source_maps": true,
+	"routes": [
+		{
+			"pattern": "5837scout.app",
+			"custom_domain": true
+		},
+		{
+			"pattern": "admin.5837scout.app",
+			"custom_domain": true
+		}
+	],
 	"vars": {
 		"CLERK_PUBLISHABLE_KEY": "pk_live_Y2xlcmsuNTgzN3Njb3V0LmFwcCQ",
 		"VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare"

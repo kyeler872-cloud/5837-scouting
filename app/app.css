@@ -35,6 +35,60 @@ body {
 .sign-in-brand { align-self: end; color: var(--white); font-size: 0.9rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
 .sign-in-page > .cl-rootBox { align-self: start; }
 .auth-loading { min-height: 100vh; background: var(--navy-950); }
+.organization-public-page, .organization-admin-page { box-sizing: border-box; min-height: 100vh; max-width: 62rem; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+.organization-public-page { max-width: 38rem; }
+.organization-public-page h1, .organization-admin-page h1 { margin: 0; font-size: clamp(2.2rem, 6vw, 4rem); letter-spacing: -0.05em; }
+.organization-public-page > p:not(.section-kicker), .organization-admin-page header > p:last-child { color: var(--muted); line-height: 1.6; }
+.organization-choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; margin: 2rem 0; }
+.organization-choice, .organization-admin-card, .organization-settings { border: 1px solid var(--line); background: var(--navy-900); padding: 1.25rem; }
+.organization-choice { display: grid; gap: 0.6rem; color: var(--white); text-decoration: none; }
+.organization-choice span, .organization-admin-card > p, .organization-admin-item p { color: var(--muted); line-height: 1.5; }
+.organization-form, .organization-settings-form { display: grid; gap: 1rem; margin: 1.5rem 0; }
+.organization-form label, .organization-settings-form label { display: grid; gap: 0.4rem; color: var(--muted); font-size: 0.8rem; font-weight: 700; }
+.organization-form input, .organization-form select, .organization-form textarea, .organization-settings-form input, .organization-settings-form select { box-sizing: border-box; width: 100%; border: 1px solid var(--line); background: var(--navy-950); color: var(--white); font: inherit; padding: 0.75rem; }
+.organization-form .search-button, .organization-settings-form .search-button { min-height: 2.8rem; }
+.join-signup { margin: 2rem 0; }
+.organization-honeypot { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+.organization-admin-page { max-width: 68rem; }
+.organization-admin-card { margin: 1.5rem 0; }
+.organization-admin-card h2, .organization-settings h2 { margin-top: 0; }
+.organization-admin-card h3 { margin: 0; }
+.organization-admin-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; border-top: 1px solid var(--line); padding: 1rem 0; }
+.organization-admin-item h3 { margin: 0; }
+.organization-admin-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.organization-admin-list, .organization-member-list { display: grid; gap: 0.65rem; margin: 1rem 0 0; padding: 0; list-style: none; }
+.organization-admin-list li, .organization-member-list li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem; border: 1px solid var(--line); border-radius: 0.65rem; background: var(--navy-950); padding: 0.85rem 1rem; }
+.organization-admin-form { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); align-items: end; }
+.organization-team-help, .organization-team-admin-item > label { color: var(--muted); line-height: 1.5; }
+.organization-team-list { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 1rem 0; padding: 0; list-style: none; }
+.organization-team-list li { display: flex; gap: 0.45rem; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: var(--navy-950); padding: 0.45rem 0.8rem; }
+.organization-team-list li span { color: var(--blue-300); font-size: 0.72rem; font-weight: 800; }
+.organization-team-admin-list { display: grid; gap: 1rem; }
+.organization-team-admin-item { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; border: 1px solid var(--line); border-radius: 0.65rem; background: var(--navy-950); padding: 1rem; }
+.organization-team-admin-item > label { display: grid; gap: 0.45rem; font-size: 0.8rem; font-weight: 700; }
+.organization-team-admin-item input { box-sizing: border-box; width: 100%; border: 1px solid var(--line); background: var(--navy-900); color: var(--white); font: inherit; padding: 0.7rem; }
+.organization-team-admin-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.organization-team-admin-heading > div { display: grid; gap: 0.25rem; }
+.organization-team-admin-heading span { color: var(--muted); font-size: 0.8rem; }
+.organization-code { display: flex; align-items: center; justify-content: space-between; gap: 1rem; border: 1px solid var(--line); background: var(--navy-950); padding: 1rem; }
+.organization-code > div { display: grid; gap: 0.5rem; }
+.organization-code code { color: var(--blue-300); font-size: 1.25rem; letter-spacing: 0.12em; }
+.organization-settings-form { max-width: 40rem; }
+.organization-member-identity { display: grid; min-width: 12rem; gap: 0.25rem; }
+.organization-member-identity span { color: var(--muted); font-size: 0.85rem; }
+.organization-admin-member-identity { display: grid; min-width: 14rem; gap: 0.25rem; }
+.organization-admin-member-identity span { color: var(--muted); font-size: 0.85rem; }
+.organization-role-badge { border: 1px solid var(--line); border-radius: 999px; background: var(--navy-900); color: var(--blue-300); font-size: 0.72rem; font-weight: 800; padding: 0.3rem 0.6rem; text-transform: capitalize; }
+.organization-role-mentor { color: #b7d8ff; }
+.organization-role-kiosk { color: #d3b8ff; }
+.organization-member-list label { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.8rem; font-weight: 700; }
+.organization-member-list select { border: 1px solid var(--line); background: var(--navy-950); color: var(--white); padding: 0.4rem; }
+.organization-member-list .organization-remove-member { border: 1px solid #9d3944; border-radius: 0.4rem; background: transparent; color: #ff858e; font: inherit; font-size: 0.82rem; font-weight: 700; padding: 0.55rem 0.75rem; cursor: pointer; }
+.organization-member-list .organization-remove-member:hover:not(:disabled) { background: rgb(157 57 68 / 18%); color: #ffadb3; }
+.organization-member-list .organization-remove-member:disabled { opacity: 0.45; cursor: not-allowed; }
+.organization-admin-list .organization-remove-member { border: 1px solid #9d3944; border-radius: 0.4rem; background: transparent; color: #ff858e; font: inherit; font-size: 0.82rem; font-weight: 700; padding: 0.55rem 0.75rem; cursor: pointer; }
+.organization-admin-list .organization-remove-member:hover:not(:disabled) { background: rgb(157 57 68 / 18%); color: #ffadb3; }
+.organization-admin-list .organization-remove-member:disabled { opacity: 0.45; cursor: not-allowed; }
 .scouting-search { max-width: 44rem; margin: 0 auto; padding: 7rem 1.25rem 4rem; text-align: center; }
 .section-kicker { margin: 0 0 0.8rem; color: var(--blue-300); font-size: 0.7rem; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; }
 .scouting-search h1 { margin: 0; font-size: clamp(3rem, 9vw, 6.5rem); letter-spacing: -0.06em; line-height: 0.95; }

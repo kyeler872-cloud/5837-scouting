@@ -95,7 +95,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
 		<ClerkProvider
 			loaderData={loaderData}
 			signInFallbackRedirectUrl="/home"
-			signUpFallbackRedirectUrl="/home"
+			signUpFallbackRedirectUrl="/onboarding"
 		>
 			<AccountTheme />
 			<RecentPageTracker />
