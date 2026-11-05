@@ -1,3 +1,4 @@
+import { useClerk } from "@clerk/react-router";
 import { Link } from "react-router";
 import type { Route } from "./+types/onboarding";
 
@@ -6,6 +7,8 @@ export function meta({}: Route.MetaArgs) {
 }
 
 export default function OnboardingPage() {
+	const clerk = useClerk();
+
 	return (
 		<main className="organization-public-page">
 			<p className="section-kicker">Scout 5837</p>
@@ -21,7 +24,9 @@ export default function OnboardingPage() {
 					<span>Apply to start a new team organization.</span>
 				</Link>
 			</div>
-			<Link to="/">Back to sign in</Link>
+			<button className="search-button" type="button" onClick={() => void clerk.signOut({ redirectUrl: "/" })}>
+				Sign out
+			</button>
 		</main>
 	);
 }
