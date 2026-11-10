@@ -9,6 +9,7 @@ import { AutoPathField, type AutoPath, type RobotAuto } from "../components/auto
 import { ScoutingDashboard } from "../components/scouting-dashboard";
 import { TopNavigation } from "../components/top-navigation";
 import { trackRecentPage } from "../recent-pages.client";
+import { noteAttributionColor } from "../note-attribution";
 
 // quick type definition for generic json objects from api
 type JsonRecord = Record<string, unknown>;
@@ -34,6 +35,10 @@ type TeamLookupResponse = {
     customEvents: { code: string; name: string; date: string | null; displayName: string }[];
     performance: { auto: { average: string | null; matchCount: number }; teleop: { average: string | null; matchCount: number } };
     performanceByEvent: EventPerformance[];
+    noteMentions: {
+        eventNotes: { event_code: string; eventName: string; category: string; content: string; attributions: { text: string; contributorId: string; contributorName: string }[]; created_at: string }[];
+        qualificationNotes: { id: string; event_code: string; eventName: string; match_key: string; phase: string; note: string; contributor_name: string; created_at: string; qualificationNumber: number }[];
+    };
     robots: RobotEntry[];
     warnings: string[];
     meta: { fetchedAt: string; source: string; editableFields: string[] };
@@ -118,12 +123,18 @@ function firstEventDate(event: JsonRecord) {
     return `${formatEventDate(start || end || "")} - ${formatEventDate(end)}`;
 }
 
-const ftcSeasons = [2026, 2025, 2024, 2023, 2022, 2021, 2020];
-const frcSeasons = Array.from({ length: 2026 - 1992 + 1 }, (_, index) => 2026 - index);
-
 function teamApiUrl(teamNumber: string, season: string, league: "FTC" | "FRC") {
     const search = new URLSearchParams({ season, league: league.toLowerCase() });
     return `/api/teams/${encodeURIComponent(teamNumber)}?${search}`;
+}
+
+function teamSeasonOptions(league: "FTC" | "FRC") {
+    const earliestSeason = league === "FTC" ? 2020 : 1992;
+    return Array.from({ length: 2026 - earliestSeason + 1 }, (_, index) => String(2026 - index));
+}
+
+function seasonLabel(season: string) {
+    return `${season}–${String(Number(season) + 1).slice(-2)}`;
 }
 
 function socialFaviconUrl(platform: keyof SocialLinks, value: string) {
@@ -158,10 +169,7 @@ export default function Home() {
     // clerk auth hook to grab auth token for api calls
     const { getToken } = useAuth();
     const [searchParams] = useSearchParams();
-    // react state hooks for tracking search inputs, team data results, errors, and loading state
-    const [teamNumber, setTeamNumber] = useState("");
-    const [league, setLeague] = useState<"FTC" | "FRC">("FTC");
-    const [season, setSeason] = useState("2026");
+    // State for the selected team profile, editing actions, errors, and loading state
     const [result, setResult] = useState<TeamLookupResponse | null>(null);
     const showGraphs = !result || result.league !== "FRC" || records(result.events).length > 1;
     const showDashboard = !result && searchParams.get("view") !== "search" && !searchParams.get("team");
@@ -170,7 +178,7 @@ export default function Home() {
     const [error, setError] = useState("");
     const [isSearching, setIsSearching] = useState(false);
     const [isSavingSocials, setIsSavingSocials] = useState(false);
-    const [activeSection, setActiveSection] = useState("auto");
+    const [activeSection, setActiveSection] = useState("robot");
     const autoSearchStarted = useRef(false);
     const teamResultsRef = useRef<HTMLElement | null>(null);
     const scrollToResultAfterSearch = useRef(false);
@@ -178,24 +186,19 @@ export default function Home() {
     async function lookupTeam(number: string, targetSeason: string, targetLeague: "FTC" | "FRC") {
         const normalizedTeamNumber = number.trim();
         if (!/^\d{1,6}$/.test(normalizedTeamNumber)) {
-            setTeamNumber(number);
-            setLeague(targetLeague);
-            setSeason(targetSeason);
             setError(`Enter a valid ${targetLeague} team number.`);
             return;
         }
 
-        setTeamNumber(normalizedTeamNumber);
-        setLeague(targetLeague);
-        setSeason(targetSeason);
         setError("");
         setResult(null);
-        setActiveSection("auto");
+        setActiveSection("robot");
         scrollToResultAfterSearch.current = true;
         setIsSearching(true);
         try {
             const token = await getToken();
             const response = await fetch(teamApiUrl(normalizedTeamNumber, targetSeason, targetLeague), {
+                cache: "no-store",
                 headers: token ? { Authorization: `Bearer ${token}` } : undefined,
             });
             const data = await readResponse<TeamLookupResponse | { error?: string }>(response);
@@ -227,7 +230,7 @@ export default function Home() {
                 .sort((first, second) => first.boundingClientRect.top - second.boundingClientRect.top)[0];
             if (visible) setActiveSection(visible.target.id);
         }, { rootMargin: "-15% 0px -70% 0px", threshold: 0 });
-        const sectionIds = ["auto", "teleop", ...(showGraphs ? ["graphs"] : []), "events", "robot"];
+        const sectionIds = ["robot", ...(showGraphs ? ["graphs"] : []), "notes", "auto", "teleop", "events"];
         const sections = sectionIds
             .map((id) => document.getElementById(id))
             .filter((section): section is HTMLElement => section !== null);
@@ -242,17 +245,8 @@ export default function Home() {
         const requestedSeason = searchParams.get("season");
         if (!requestedTeam || (requestedLeague !== "FTC" && requestedLeague !== "FRC") || !requestedSeason) return;
         autoSearchStarted.current = true;
-        setTeamNumber(requestedTeam);
-        setLeague(requestedLeague);
-        setSeason(requestedSeason);
         void lookupTeam(requestedTeam, requestedSeason, requestedLeague);
     }, [searchParams, getToken]);
-
-    // handles search form submission and fetches team data from backend
-    async function searchTeam(event: React.FormEvent<HTMLFormElement>) {
-        event.preventDefault();
-        await lookupTeam(teamNumber, season, league);
-    }
 
     // sends put request to save custom notes or overrides to database
     async function saveOverride(field: string, value: string) {
@@ -364,31 +358,17 @@ export default function Home() {
 
     // renders the page UI inside protected auth wrapper
     return (
-        <Protected>
+        <Protected requireOrganization={false}>
             {showDashboard ? <ScoutingDashboard /> : (
             <main className="home-shell">
-                <TopNavigation currentPage="team-search" rightContent={<><UserBadge /><UserButton /></>} />
-                {/* team search form section */}
-                <section className="scouting-search" aria-labelledby="scouting-title">
+                <TopNavigation rightContent={<><UserBadge /><UserButton /></>} />
+                {!result && <section className="live-search-help" aria-labelledby="scouting-title">
                     <p className="section-kicker">FIRST Robotics Scouting</p>
-                    <h1 id="scouting-title">search for a team!</h1>
-                    <p className="search-intro">Search team profiles, event history, awards, and match performance.</p>
-                    <form className="team-search" onSubmit={searchTeam}>
-                        <div className="search-options">
-                            <div><label htmlFor="league">Program</label><select id="league" value={league} onChange={(event) => setLeague(event.target.value as "FTC" | "FRC")}>
-                                <option value="FTC">FTC</option>
-                                <option value="FRC">FRC</option>
-                            </select></div>
-                            <div><label htmlFor="season">Season</label><select id="season" value={season} onChange={(event) => setSeason(event.target.value)}>{(league === "FTC" ? ftcSeasons : frcSeasons).map((year) => <option key={year} value={year}>{year}-{String(year + 1).slice(-2)}</option>)}</select></div>
-                        </div>
-                        <div className="team-number-field"><label htmlFor="team-number">{league} team number</label><input id="team-number" inputMode="numeric" pattern="[0-9]*" placeholder={league === "FTC" ? "7247" : "5837"} value={teamNumber} onChange={(event) => setTeamNumber(event.target.value)} /></div>
-                        <div className="search-row">
-                            <button className="search-button" type="submit" disabled={isSearching}>{isSearching ? "Searching..." : "Search"}</button>
-                        </div>
-                    </form>
+                    <h1 id="scouting-title">Search teams live</h1>
+                    <p className="search-intro">Start typing in the search bar above. Choose a matching team to open its scouting profile.</p>
+                    {isSearching && <p className="logs-status" role="status">Loading team profile…</p>}
                     {error && <p className="lookup-error" role="alert">{error}</p>}
-                </section>
-                {/* only shows search results if team data was found */}
+                </section>}
                 {result && (
                     <section className="team-results" aria-live="polite" ref={teamResultsRef}>
                         {/* team heading with name, location, logo */}
@@ -397,6 +377,15 @@ export default function Home() {
                                 <p className="section-kicker">{result.league} team {result.teamNumber} / {result.season} season</p>
                                 <h2>{textValue(result.team, ["nameLong", "nameShort", "nickname", "name"]) || `Team ${result.teamNumber}`}</h2>
                                 <p>{[textValue(result.team, ["city"]), textValue(result.team, ["state", "state_prov"]), textValue(result.team, ["country"])].filter(Boolean).join(", ") || "Location unavailable"}</p>
+                                <label className="team-season-picker">
+                                    <span>View another season</span>
+                                    <select value={result.season} aria-label="View team profile from another season" onChange={(event) => {
+                                        const params = new URLSearchParams({ team: result.teamNumber, league: result.league, season: event.target.value });
+                                        window.location.assign(`/home?${params}`);
+                                    }}>
+                                        {teamSeasonOptions(result.league).map((year) => <option value={year} key={year}>{seasonLabel(year)}</option>)}
+                                    </select>
+                                </label>
                             </div>
                             {(() => { const logo = textValue(result.team, ["logo", "logoUrl", "teamLogo"]); return logo ? <img className="team-logo" src={logo} alt="Team logo" /> : null; })()}
                         </header>
@@ -482,7 +471,7 @@ export default function Home() {
                             <aside className="section-sidebar" aria-label="Team page sections">
                                 <p>On this page</p>
                                 <nav>
-                                    {(["auto", "teleop", ...(showGraphs ? ["graphs" as const] : []), "events", "robot"] as const).map((id) => (
+                                    {(["robot", ...(showGraphs ? ["graphs" as const] : []), "notes", "auto", "teleop", "events"] as const).map((id) => (
                                         <button
                                             type="button"
                                             key={id}
@@ -490,12 +479,30 @@ export default function Home() {
                                             aria-current={activeSection === id ? "location" : undefined}
                                             onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
                                         >
-                                            {id === "teleop" ? "TeleOp" : id === "auto" ? "Auto" : id[0].toUpperCase() + id.slice(1)}
+                                            {id === "teleop" ? "TeleOp" : id === "notes" ? "Notes" : id[0].toUpperCase() + id.slice(1)}
                                         </button>
                                     ))}
                                 </nav>
                             </aside>
                             <div className="team-sections">
+                                <section className="team-section" id="robot">
+                                    <SectionHeading eyebrow="Build history" title="Robot" />
+                                    <RobotSection robots={result.robots} onSave={saveRobot} onSaveAuto={saveRobotAuto} league={result.league} season={result.season} />
+                                </section>
+                                {showGraphs && <section className="team-section score-trend-section" id="graphs">
+                                    <div className="score-trend-heading">
+                                        <SectionHeading eyebrow="Season performance" title="Team score graphs by event" />
+                                        <a className="compare-page-link" href={`/compare?${new URLSearchParams({ team: result.teamNumber, league: result.league, season: result.season, from: "team" })}`}>Compare with a different team <span aria-hidden="true">→</span></a>
+                                    </div>
+                                    <p className="section-description">Compare Auto and TeleOp alliance averages across the season.</p>
+                                    <ScoreTrendChart league={result.league} teams={[{ teamNumber: result.teamNumber, events: result.performanceByEvent }]} />
+                                </section>}
+                                <TeamNoteMentions
+                                    league={result.league}
+                                    season={result.season}
+                                    teamNumber={result.teamNumber}
+                                    noteMentions={result.noteMentions}
+                                />
                                 <PerformanceSection
                                     id="auto"
                                     title="Auto"
@@ -518,14 +525,6 @@ export default function Home() {
                                     note={result.overrides.teleopNotes}
                                     onSave={saveOverride}
                                 />
-                                {showGraphs && <section className="team-section score-trend-section" id="graphs">
-                                    <div className="score-trend-heading">
-                                        <SectionHeading eyebrow="Season performance" title="Team score graphs by event" />
-                                        <a className="compare-page-link" href={`/compare?${new URLSearchParams({ team: result.teamNumber, league: result.league, season: result.season, from: "team" })}`}>Compare with a different team <span aria-hidden="true">→</span></a>
-                                    </div>
-                                    <p className="section-description">Compare Auto and TeleOp alliance averages across the season.</p>
-                                    <ScoreTrendChart league={result.league} teams={[{ teamNumber: result.teamNumber, events: result.performanceByEvent }]} />
-                                </section>}
                                 <section className="team-section" id="events">
                                     <SectionHeading eyebrow="Competition record" title="Events" />
                                     <details className="events-awards" open>
@@ -535,10 +534,6 @@ export default function Home() {
                                             <ResultList league={result.league} title="Awards" items={records(result.awards)} primaryKeys={["name", "awardName", "eventName"]} />
                                         </div>
                                     </details>
-                                </section>
-                                <section className="team-section" id="robot">
-                                    <SectionHeading eyebrow="Build history" title="Robot" />
-                                    <RobotSection robots={result.robots} onSave={saveRobot} onSaveAuto={saveRobotAuto} league={result.league} season={result.season} />
                                 </section>
                             </div>
                         </div>
@@ -576,6 +571,79 @@ function UserBadge() {
 
 function SectionHeading({ eyebrow, title }: { eyebrow: string; title: string }) {
     return <header className="team-section-heading"><p className="section-kicker">{eyebrow}</p><h3>{title}</h3></header>;
+}
+
+function TeamNoteMentions({ league, season, teamNumber, noteMentions }: {
+    league: "FTC" | "FRC";
+    season: string;
+    teamNumber: string;
+    noteMentions: TeamLookupResponse["noteMentions"];
+}) {
+    const qualificationGroups = new Map<string, typeof noteMentions.qualificationNotes>();
+    for (const note of noteMentions.qualificationNotes) {
+        const key = `${note.event_code}:${note.match_key}`;
+        qualificationGroups.set(key, [...(qualificationGroups.get(key) || []), note]);
+    }
+    const eventUrl = (eventCode: string) => `/events/${league}/${encodeURIComponent(season)}/${encodeURIComponent(eventCode)}`;
+    const renderHighlightedText = (text: string) => {
+        const escapedTeamNumber = teamNumber.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const teamNumberPattern = new RegExp(`(\\b${escapedTeamNumber}\\b)`, "g");
+        return text.split(teamNumberPattern).map((part, index) => part === teamNumber
+            ? <mark className="team-note-mentioned-number" key={index}>{part}</mark>
+            : part);
+    };
+    const renderNote = (attributions: typeof noteMentions.eventNotes[number]["attributions"]) => {
+        return attributions.map((attribution, index) => {
+            const contributor = attribution.contributorId || attribution.contributorName;
+            return <span
+                className="team-note-attribution"
+                key={`${index}-${contributor}`}
+                style={{ backgroundColor: noteAttributionColor(attribution.contributorId, attribution.contributorName) }}
+                title={`Added by ${attribution.contributorName}`}
+            >
+                {renderHighlightedText(attribution.text)}
+            </span>;
+        });
+    };
+
+    return (
+        <section className="team-section team-note-mentions" id="notes">
+            <SectionHeading eyebrow="Shared scouting notes" title={`Notes mentioning ${teamNumber}`} />
+            {!noteMentions.qualificationNotes.length && !noteMentions.eventNotes.length
+                ? <p className="section-description">No qualification or general event notes mention this team this season.</p>
+                : <>
+                    {qualificationGroups.size > 0 && <section className="team-note-group">
+                        <h4>Qualification notes</h4>
+                        {[...qualificationGroups.entries()].map(([key, notes]) => {
+                            const first = notes[0];
+                            return <details className="team-note-disclosure" key={key}>
+                                <summary><span><a href={eventUrl(first.event_code)}>{first.eventName}</a></span><strong>Qualification {first.qualificationNumber}</strong><small>{notes.length} {notes.length === 1 ? "note" : "notes"}</small></summary>
+                                <div className="team-note-entries">{notes.map((note) => <article className="event-match-note-entry" key={note.id}>
+                                    <h5>{note.phase}</h5>
+                                    <div className="event-match-saved-note">{renderHighlightedText(note.note)}</div>
+                                    <small>Added by: {note.contributor_name}</small>
+                                </article>)}</div>
+                                <a className="team-note-edit-link" href={`${eventUrl(first.event_code)}?${new URLSearchParams({ league, season })}`}>Open event to add or edit notes →</a>
+                            </details>;
+                        })}
+                    </section>}
+                    {noteMentions.eventNotes.length > 0 && <section className="team-note-group">
+                        <h4>General event notes</h4>
+                        {noteMentions.eventNotes.map((note) => {
+                            const key = `${note.event_code}:${note.category}`;
+                            return <details className="team-note-disclosure" key={key}>
+                                <summary><span><a href={eventUrl(note.event_code)}>{note.eventName}</a></span><strong>{note.category}</strong></summary>
+                                <div className="team-note-entries">
+                                    <div className="event-match-saved-note team-note-attributed-text">{renderNote(note.attributions)}</div>
+                                    <p className="team-note-contributor-hint">Hover over a highlight to see who added that text.</p>
+                                </div>
+                                <a className="team-note-edit-link" href={`${eventUrl(note.event_code)}?${new URLSearchParams({ league, season })}`}>Open event to edit notes →</a>
+                            </details>;
+                        })}
+                    </section>}
+                </>}
+        </section>
+    );
 }
 
 function PerformanceSection({ id, title, description, score, matchCount, league, note, onSave }: {

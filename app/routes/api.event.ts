@@ -3,13 +3,33 @@ import type { Route } from "./+types/api.event";
 import { cloudflareContext } from "../cloudflare-context";
 import { getOrganizationMembership } from "../organizations.server";
 import { auditStatement, getAuditActor, getLocalContributorName, NOTE_ADMIN_EMAIL, type AuditActor } from "../audit.server";
+import { parseNoteAttributions, updateNoteAttributions, type AttributedNoteDocument, type NoteAttribution } from "../note-attribution";
 
 type League = "FTC" | "FRC";
 type ApiObject = Record<string, unknown>;
 type EventTeam = { number: string; name: string; manual: boolean };
 type MatchPhase = "Auto" | "TeleOp" | "Endgame";
+type NoteCategory = "Matches" | "Playoffs" | "Notes";
 type AutoPoint = { x: number; y: number };
 type AutoPath = { points: AutoPoint[]; controls: AutoPoint[] };
+type EventMatchScoutingRecord = {
+	teamNumber: string;
+	flower: number | null;
+	pollen: number | null;
+	nectar: number | null;
+	allianceTips?: number | null;
+	allianceAutoPoints?: number | null;
+	additionalNotes: string;
+	updatedBy: string;
+	updatedAt: string;
+};
+type EventMatchAllianceScouting = {
+	alliance: "red" | "blue";
+	allianceTips: number | null;
+	allianceAutoPoints: number | null;
+	updatedBy: string;
+	updatedAt: string;
+};
 type CompatibilityWeights = {
 	flowerCapability: number;
 	flowerTakeFrom: number;
@@ -32,6 +52,8 @@ type EventMatch = {
 	notes: Partial<Record<MatchPhase, { id: string; value: string; displayName: string; canDelete: boolean }[]>>;
 	autoPath?: { path: AutoPath; displayName: string } | null;
 	autoSelections?: EventAutoSelection[];
+	scouting?: EventMatchScoutingRecord[];
+	allianceScouting?: EventMatchAllianceScouting[];
 };
 type EventAuto = { id: string; name: string; alliance: "red" | "blue"; score: number | null; path: AutoPath };
 type EventAutoSelection = {
@@ -83,6 +105,16 @@ function parseAutoPath(value: unknown): AutoPath | null {
 		"y" in point && typeof point.y === "number" && Number.isFinite(point.y) && point.y >= 0 && point.y <= 1000;
 	if (!record.points.every(validPoint) || !record.controls.every(validPoint)) return null;
 	return { points: record.points, controls: record.controls };
+}
+
+function validScoreInput(value: unknown): value is string | number | null {
+	if (value === null || value === "") return true;
+	if (typeof value === "number") return Number.isInteger(value) && value >= 0 && value <= 10000;
+	return typeof value === "string" && /^\d{1,5}$/.test(value) && Number(value) <= 10000;
+}
+
+function parseScoreInput(value: string | number | null) {
+	return value === null || value === "" ? null : Number(value);
 }
 
 function parseRobotAutos(value: string): EventAuto[] {
@@ -340,27 +372,25 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
 	const organization = await getOrganizationMembership(env.SCOUTING_DB, session.sub);
-	if (!organization) return json({ error: "Join an organization before accessing scouting notes." }, 403);
-	const organizationId = organization.organization_id;
+	const organizationId = organization?.organization_id;
 
 	const league = params.league?.toUpperCase();
 	const season = params.season || "";
 	const eventCode = params.eventCode || "";
 	if (league !== "FTC" && league !== "FRC") return json({ error: "Choose FTC or FRC." }, 400);
-	const enabledLeague = await env.SCOUTING_DB.prepare("SELECT team_number FROM organization_teams WHERE organization_id = ? AND league = ? LIMIT 1")
-		.bind(organizationId, league).first<{ team_number: string }>();
-	if (!enabledLeague) return json({ error: `${league} scouting is not enabled for your organization.` }, 403);
 	if (!/^\d{4}$/.test(season) || Number(season) < 1992 || Number(season) > 2100) return json({ error: "Choose a valid season." }, 400);
 	if (!/^[a-zA-Z0-9_-]{1,120}$/.test(eventCode)) return json({ error: "Invalid event code." }, 400);
-	let actor: AuditActor;
-	try {
-		actor = await getAuditActor(env, session.sub);
-	} catch (error) {
-		console.error(JSON.stringify({
-			message: "Could not verify event note permissions",
-			error: error instanceof Error ? error.message : String(error),
-		}));
-		return json({ error: "Could not verify event note permissions." }, 503);
+	let actor: AuditActor | null = null;
+	if (organization) {
+		try {
+			actor = await getAuditActor(env, session.sub);
+		} catch (error) {
+			console.error(JSON.stringify({
+				message: "Could not verify event note permissions",
+				error: error instanceof Error ? error.message : String(error),
+			}));
+			return json({ error: "Could not verify event note permissions." }, 503);
+		}
 	}
 
 	let event: ApiObject | null = null;
@@ -447,9 +477,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	}
 
 	const matches = custom ? [] : qualificationMatches(scheduleData, league);
-	const [notes, assets, manualTeams, compatibilityRow, robotRows] = await Promise.all([
-		env.SCOUTING_DB.prepare("SELECT category, note, updated_by_account_name FROM event_notes WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ?")
-			.bind(organizationId, league, season, eventCode).all<{ category: string; note: string; updated_by_account_name: string }>(),
+	const [assets, manualTeams, compatibilityRow, robotRows] = await Promise.all([
 		env.SCOUTING_DB.prepare("SELECT photos_url FROM event_assets WHERE league = ? AND season = ? AND event_code = ?")
 			.bind(league, season, eventCode).first<{ photos_url: string }>(),
 		env.SCOUTING_DB.prepare("SELECT team_number, team_name FROM event_manual_teams WHERE league = ? AND season = ? AND event_code = ? ORDER BY team_number")
@@ -459,9 +487,42 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		env.SCOUTING_DB.prepare("SELECT id, team_number, name, autos, start_month, created_at, scoring_capabilities FROM robot_entries WHERE season = ? AND end_month IS NULL ORDER BY start_month DESC, created_at DESC")
 			.bind(season).all<{ id: string; team_number: string; name: string; autos: string; start_month: string; created_at: string; scoring_capabilities: string }>(),
 	]);
-	let matchNotes: { results: { id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string | null; contributor_name: string }[] };
+	let eventNoteDocuments: Record<string, AttributedNoteDocument & { updatedBy: string; updatedByAccountName: string; updatedAt: string }> = {};
+	let eventNotesMigrationPending = false;
+	if (organization) try {
+		const documents = await env.SCOUTING_DB.prepare(`SELECT category, content, attributions, updated_by, updated_by_account_name, updated_at
+			FROM event_note_documents WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ?`)
+			.bind(organizationId, league, season, eventCode)
+			.all<{ category: NoteCategory; content: string; attributions: string; updated_by: string; updated_by_account_name: string; updated_at: string }>();
+		eventNoteDocuments = Object.fromEntries(documents.results.map((document) => [document.category, {
+			content: document.content,
+			attributions: parseNoteAttributions(document.attributions, document.content),
+			updatedBy: document.updated_by,
+			updatedByAccountName: document.updated_by_account_name,
+			updatedAt: document.updated_at,
+		}]));
+	} catch (error) {
+		if (!(error instanceof Error) || !/no such table:\s*event_note_documents/i.test(error.message)) throw error;
+		eventNotesMigrationPending = true;
+		console.error(JSON.stringify({
+			message: "Contributor event notes are unavailable because their migration has not been applied",
+			migration: "0024_event_note_documents.sql",
+		}));
+		const legacyNotes = await env.SCOUTING_DB.prepare(`SELECT category, note, updated_by, updated_by_account_name, updated_at
+			FROM event_notes WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? ORDER BY category`)
+			.bind(organizationId, league, season, eventCode)
+			.all<{ category: NoteCategory; note: string; updated_by: string; updated_by_account_name: string; updated_at: string }>();
+		eventNoteDocuments = Object.fromEntries(legacyNotes.results.map((note) => [note.category, {
+			content: note.note,
+			attributions: note.note ? [{ text: note.note, contributorId: note.updated_by, contributorName: note.updated_by_account_name }] : [],
+			updatedBy: note.updated_by,
+			updatedByAccountName: note.updated_by_account_name,
+			updatedAt: note.updated_at,
+		}]));
+	}
+	let matchNotes: { results: { id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string | null; contributor_name: string }[] } = { results: [] };
 	let matchNotesMigrationPending = false;
-	try {
+	if (organization) try {
 		matchNotes = await env.SCOUTING_DB.prepare(`SELECT id, match_key, phase, note, contributor_id, contributor_name
 			FROM event_match_scouting_notes WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? ORDER BY created_at, id`)
 			.bind(organizationId, league, season, eventCode).all<{ id: string; match_key: string; phase: MatchPhase; note: string; contributor_id: string; contributor_name: string }>();
@@ -486,6 +547,96 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 				contributor_name: item.updated_by_account_name,
 			})),
 		};
+	}
+	let matchScouting: { results: {
+		match_key: string;
+		team_number: string;
+		flower: number | null;
+		pollen: number | null;
+		nectar: number | null;
+		alliance_tips: number | null;
+		alliance_auto_points: number | null;
+		additional_notes: string;
+		updated_by_account_name: string;
+		updated_at: string;
+	}[] } = { results: [] };
+	let matchScoutingMigrationPending = false;
+	if (league === "FTC" && season === "2026" && organization) try {
+		matchScouting = await env.SCOUTING_DB.prepare(`SELECT match_key, team_number, flower, pollen, nectar, alliance_tips, alliance_auto_points,
+			additional_notes, updated_by_account_name, updated_at
+			FROM event_match_2026_scouting WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ?
+			ORDER BY match_key, team_number`)
+			.bind(organizationId, league, season, eventCode)
+			.all<{
+				match_key: string;
+				team_number: string;
+				flower: number | null;
+				pollen: number | null;
+				nectar: number | null;
+				alliance_tips: number | null;
+				alliance_auto_points: number | null;
+				additional_notes: string;
+				updated_by_account_name: string;
+				updated_at: string;
+			}>();
+	} catch (error) {
+		if (!(error instanceof Error)) throw error;
+		if (/no such table:\s*event_match_2026_scouting/i.test(error.message)) {
+			matchScoutingMigrationPending = true;
+			console.error(JSON.stringify({
+				message: "2026–27 FTC match scouting is unavailable because its migration has not been applied",
+				migration: "0026_2026_27_match_scouting.sql",
+			}));
+		} else if (/no such column:\s*nectar/i.test(error.message)) {
+			try {
+				const legacyRecords = await env.SCOUTING_DB.prepare(`SELECT match_key, team_number, flower, pollen, alliance_tips, alliance_auto_points,
+					additional_notes, updated_by_account_name, updated_at
+					FROM event_match_2026_scouting WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ?
+					ORDER BY match_key, team_number`)
+					.bind(organizationId, league, season, eventCode)
+					.all<Omit<(typeof matchScouting.results)[number], "nectar">>();
+				matchScouting = { results: legacyRecords.results.map((record) => ({ ...record, nectar: null })) };
+			} catch {
+				throw error;
+			}
+			matchScoutingMigrationPending = true;
+			console.error(JSON.stringify({
+				message: "Nectar scouting is unavailable because its migration has not been applied",
+				migration: "0027_2026_27_nectar_and_alliance_scouting.sql",
+			}));
+		} else {
+			throw error;
+		}
+	}
+	let allianceScouting: { results: {
+		match_key: string;
+		alliance: "red" | "blue";
+		alliance_tips: number | null;
+		alliance_auto_points: number | null;
+		updated_by_account_name: string;
+		updated_at: string;
+	}[] } = { results: [] };
+	let allianceScoutingMigrationPending = false;
+	if (league === "FTC" && season === "2026" && organization) try {
+		allianceScouting = await env.SCOUTING_DB.prepare(`SELECT match_key, alliance, alliance_tips, alliance_auto_points, updated_by_account_name, updated_at
+			FROM event_match_2026_alliance_scouting WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ?
+			ORDER BY match_key, alliance`)
+			.bind(organizationId, league, season, eventCode)
+			.all<{
+				match_key: string;
+				alliance: "red" | "blue";
+				alliance_tips: number | null;
+				alliance_auto_points: number | null;
+				updated_by_account_name: string;
+				updated_at: string;
+			}>();
+	} catch (error) {
+		if (!(error instanceof Error) || !/no such table:\s*event_match_2026_alliance_scouting/i.test(error.message)) throw error;
+		allianceScoutingMigrationPending = true;
+		console.error(JSON.stringify({
+			message: "2026–27 FTC alliance scouting is unavailable because its migration has not been applied",
+			migration: "0027_2026_27_nectar_and_alliance_scouting.sql",
+		}));
 	}
 	let matchAutoPaths: { results: { match_key: string; path: string; updated_by_account_name: string }[] } = { results: [] };
 	let autoPathMigrationPending = false;
@@ -535,6 +686,8 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	const notesByMatch = new Map<string, EventMatch["notes"]>();
 	const autoPathsByMatch = new Map<string, NonNullable<EventMatch["autoPath"]>>();
 	const autoSelectionsByMatch = new Map<string, EventAutoSelection[]>();
+	const scoutingByMatch = new Map<string, EventMatchScoutingRecord[]>();
+	const allianceScoutingByMatch = new Map<string, EventMatchAllianceScouting[]>();
 	for (const item of matchNotes.results) {
 		const notes = notesByMatch.get(item.match_key) || {};
 		const phaseNotes = notes[item.phase] || [];
@@ -542,7 +695,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 			id: item.id,
 			value: item.note,
 			displayName: item.contributor_name,
-			canDelete: Boolean(item.contributor_id && (item.contributor_id === session.sub || actor.email === NOTE_ADMIN_EMAIL)),
+			canDelete: Boolean(item.contributor_id && (item.contributor_id === session.sub || actor?.email === NOTE_ADMIN_EMAIL)),
 		});
 		notes[item.phase] = phaseNotes;
 		notesByMatch.set(item.match_key, notes);
@@ -567,6 +720,49 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		});
 		autoSelectionsByMatch.set(item.match_key, selections);
 	}
+	for (const item of matchScouting.results) {
+		const records = scoutingByMatch.get(item.match_key) || [];
+		records.push({
+			teamNumber: item.team_number,
+			flower: item.flower,
+			pollen: item.pollen,
+			nectar: item.nectar,
+			allianceTips: item.alliance_tips,
+			allianceAutoPoints: item.alliance_auto_points,
+			additionalNotes: item.additional_notes,
+			updatedBy: item.updated_by_account_name,
+			updatedAt: item.updated_at,
+		});
+		scoutingByMatch.set(item.match_key, records);
+	}
+	for (const item of allianceScouting.results) {
+		const records = allianceScoutingByMatch.get(item.match_key) || [];
+		records.push({
+			alliance: item.alliance,
+			allianceTips: item.alliance_tips,
+			allianceAutoPoints: item.alliance_auto_points,
+			updatedBy: item.updated_by_account_name,
+			updatedAt: item.updated_at,
+		});
+		allianceScoutingByMatch.set(item.match_key, records);
+	}
+	for (const match of matches) {
+		const savedAlliances = allianceScoutingByMatch.get(match.matchKey) || [];
+		for (const alliance of ["red", "blue"] as const) {
+			if (savedAlliances.some((record) => record.alliance === alliance)) continue;
+			const allianceTeams = alliance === "red" ? match.redTeams : match.blueTeams;
+			const legacy = (scoutingByMatch.get(match.matchKey) || []).find((record) => allianceTeams.includes(record.teamNumber));
+			if (!legacy || (legacy.allianceTips == null && legacy.allianceAutoPoints == null)) continue;
+			savedAlliances.push({
+				alliance,
+				allianceTips: legacy.allianceTips ?? null,
+				allianceAutoPoints: legacy.allianceAutoPoints ?? null,
+				updatedBy: legacy.updatedBy,
+				updatedAt: legacy.updatedAt,
+			});
+		}
+		allianceScoutingByMatch.set(match.matchKey, savedAlliances);
+	}
 	for (const team of manualTeams.results) {
 		const existing = teams.find((item) => item.number === team.team_number);
 		if (existing) {
@@ -577,6 +773,7 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	}
 
 	return json({
+		canAddNotes: Boolean(organization),
 		league,
 		season,
 		eventCode,
@@ -597,14 +794,25 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 			notes: notesByMatch.get(match.matchKey) || {},
 			autoPath: autoPathsByMatch.get(match.matchKey) || null,
 			autoSelections: autoSelectionsByMatch.get(match.matchKey) || [],
+			scouting: scoutingByMatch.get(match.matchKey) || [],
+			allianceScouting: allianceScoutingByMatch.get(match.matchKey) || [],
 		})),
-		notes: Object.fromEntries(notes.results.map((note) => [note.category, { value: note.note, displayName: note.updated_by_account_name }])),
+		notes: Object.fromEntries(NOTE_CATEGORIES.map((category) => [category, eventNoteDocuments[category] || {
+			content: "",
+			attributions: [] as NoteAttribution[],
+			updatedBy: "",
+			updatedByAccountName: "",
+			updatedAt: "",
+		}])),
 		photosUrl: assets?.photos_url || "",
 		warning: [
 			warning,
 			matchNotesMigrationPending ? "Adding individual match notes is temporarily unavailable. Apply database migration 0019." : null,
 			autoPathMigrationPending ? "Legacy unassigned qualification paths are unavailable until migration 0017 is applied." : null,
 			autoSelectionMigrationPending ? "Team auto selection is temporarily unavailable. Apply database migration 0018 to enable it." : null,
+			eventNotesMigrationPending ? "Shared contributor notes are temporarily unavailable. Apply database migration 0024." : null,
+			matchScoutingMigrationPending ? "Some 2026–27 FTC scoring data is temporarily unavailable. Apply the pending 2026–27 scouting migration." : null,
+			allianceScoutingMigrationPending ? "2026–27 FTC alliance scouting is temporarily unavailable. Apply database migration 0027." : null,
 		].filter(Boolean).join(" ") || null,
 	});
 }
@@ -625,13 +833,11 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if ((league !== "FTC" && league !== "FRC") || !/^\d{4}$/.test(season) || !/^[a-zA-Z0-9_-]{1,120}$/.test(eventCode)) {
 		return json({ error: "Invalid event." }, 400);
 	}
-	const enabledLeague = await env.SCOUTING_DB.prepare("SELECT team_number FROM organization_teams WHERE organization_id = ? AND league = ? LIMIT 1")
-		.bind(organizationId, league).first<{ team_number: string }>();
-	if (!enabledLeague) return json({ error: `${league} scouting is not enabled for your organization.` }, 403);
 	let body: {
 		action?: unknown;
 		category?: unknown;
 		note?: unknown;
+		baseContent?: unknown;
 		photosUrl?: unknown;
 		teamNumber?: unknown;
 		teamName?: unknown;
@@ -639,6 +845,13 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		noteId?: unknown;
 		notes?: unknown;
 		autoMapping?: unknown;
+		flower?: unknown;
+		pollen?: unknown;
+		nectar?: unknown;
+		allianceTips?: unknown;
+		allianceAutoPoints?: unknown;
+		alliance?: unknown;
+		additionalNotes?: unknown;
 	};
 	try {
 		body = await request.json() as typeof body;
@@ -649,6 +862,103 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	try {
 		const actor = await getAuditActor(env, session.sub, getLocalContributorName(request), true);
 		const displayName = actor.accountName;
+		if (body.action === "match-score-scouting") {
+			if (league !== "FTC" || season !== "2026") {
+				return json({ error: "Scoring scouting is only available for the 2026–27 FTC season." }, 400);
+			}
+			if (typeof body.matchKey !== "string" || !/^qual-\d{1,4}$/.test(body.matchKey)) return json({ error: "Choose a valid qualification." }, 400);
+			if (typeof body.teamNumber !== "string" || !/^\d{1,6}$/.test(body.teamNumber)) return json({ error: "Choose a valid team." }, 400);
+			if (!validScoreInput(body.flower) || !validScoreInput(body.pollen) || !validScoreInput(body.nectar)) {
+				return json({ error: "Scores must be whole numbers from 0 to 10,000, or left blank." }, 400);
+			}
+			if (typeof body.additionalNotes !== "string" || body.additionalNotes.length > 10000) {
+				return json({ error: "Additional notes must be 10,000 characters or fewer." }, 400);
+			}
+			const match = await getQualificationMatch(env, league, season, eventCode, body.matchKey);
+			if (!match) return json({ error: "Qualification not found in the event schedule." }, 404);
+			if (!match.teams.includes(body.teamNumber)) return json({ error: "Choose a team participating in this qualification." }, 400);
+			const flower = parseScoreInput(body.flower);
+			const pollen = parseScoreInput(body.pollen);
+			const nectar = parseScoreInput(body.nectar);
+			const additionalNotes = body.additionalNotes.trim();
+			const previous = await env.SCOUTING_DB.prepare(`SELECT flower, pollen, nectar, additional_notes
+				FROM event_match_2026_scouting
+				WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND match_key = ? AND team_number = ?`)
+				.bind(organizationId, league, season, eventCode, body.matchKey, body.teamNumber)
+				.first<{ flower: number | null; pollen: number | null; nectar: number | null; additional_notes: string }>();
+			const values = JSON.stringify({ flower, pollen, nectar, additionalNotes });
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`INSERT INTO event_match_2026_scouting
+					(organization_id, league, season, event_code, match_key, team_number, flower, pollen, nectar, alliance_tips, alliance_auto_points, additional_notes, updated_by, updated_by_account_name, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, CURRENT_TIMESTAMP)
+					ON CONFLICT(organization_id, league, season, event_code, match_key, team_number)
+					DO UPDATE SET flower = excluded.flower, pollen = excluded.pollen, nectar = excluded.nectar, additional_notes = excluded.additional_notes,
+						updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
+					.bind(organizationId, league, season, eventCode, body.matchKey, body.teamNumber, flower, pollen, nectar, additionalNotes, session.sub, displayName),
+				auditStatement(env.SCOUTING_DB, actor, "Saved 2026–27 FTC match scoring", `${league} ${season} / ${eventCode} / ${body.matchKey} / team ${body.teamNumber}`,
+					previous ? JSON.stringify({
+						flower: previous.flower,
+						pollen: previous.pollen,
+						nectar: previous.nectar,
+						additionalNotes: previous.additional_notes,
+					}) : null, values),
+			]);
+			return json({
+				matchKey: body.matchKey,
+				record: {
+					teamNumber: body.teamNumber,
+					flower,
+					pollen,
+					nectar,
+					additionalNotes,
+					updatedBy: displayName,
+					updatedAt: new Date().toISOString(),
+				} satisfies EventMatchScoutingRecord,
+			});
+		}
+		if (body.action === "match-alliance-scouting") {
+			if (league !== "FTC" || season !== "2026") {
+				return json({ error: "Scoring scouting is only available for the 2026–27 FTC season." }, 400);
+			}
+			if (typeof body.matchKey !== "string" || !/^qual-\d{1,4}$/.test(body.matchKey)) return json({ error: "Choose a valid qualification." }, 400);
+			if (body.alliance !== "red" && body.alliance !== "blue") return json({ error: "Choose a valid alliance." }, 400);
+			if (!validScoreInput(body.allianceTips) || !validScoreInput(body.allianceAutoPoints)) {
+				return json({ error: "Alliance scores must be whole numbers from 0 to 10,000, or left blank." }, 400);
+			}
+			const match = await getQualificationMatch(env, league, season, eventCode, body.matchKey);
+			if (!match) return json({ error: "Qualification not found in the event schedule." }, 404);
+			if (!(body.alliance === "red" ? match.redTeams : match.blueTeams).length) {
+				return json({ error: "This alliance is not available in the qualification schedule." }, 400);
+			}
+			const allianceTips = parseScoreInput(body.allianceTips);
+			const allianceAutoPoints = parseScoreInput(body.allianceAutoPoints);
+			const previous = await env.SCOUTING_DB.prepare(`SELECT alliance_tips, alliance_auto_points FROM event_match_2026_alliance_scouting
+				WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND match_key = ? AND alliance = ?`)
+				.bind(organizationId, league, season, eventCode, body.matchKey, body.alliance)
+				.first<{ alliance_tips: number | null; alliance_auto_points: number | null }>();
+			const values = JSON.stringify({ allianceTips, allianceAutoPoints });
+			await env.SCOUTING_DB.batch([
+				env.SCOUTING_DB.prepare(`INSERT INTO event_match_2026_alliance_scouting
+					(organization_id, league, season, event_code, match_key, alliance, alliance_tips, alliance_auto_points, updated_by, updated_by_account_name, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+					ON CONFLICT(organization_id, league, season, event_code, match_key, alliance)
+					DO UPDATE SET alliance_tips = excluded.alliance_tips, alliance_auto_points = excluded.alliance_auto_points,
+						updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
+					.bind(organizationId, league, season, eventCode, body.matchKey, body.alliance, allianceTips, allianceAutoPoints, session.sub, displayName),
+				auditStatement(env.SCOUTING_DB, actor, "Saved 2026–27 FTC alliance scoring", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${body.alliance} alliance`,
+					previous ? JSON.stringify({ allianceTips: previous.alliance_tips, allianceAutoPoints: previous.alliance_auto_points }) : null, values),
+			]);
+			return json({
+				matchKey: body.matchKey,
+				record: {
+					alliance: body.alliance,
+					allianceTips,
+					allianceAutoPoints,
+					updatedBy: displayName,
+					updatedAt: new Date().toISOString(),
+				} satisfies EventMatchAllianceScouting,
+			});
+		}
 		if (body.action === "match-scouting") {
 			if (typeof body.matchKey !== "string" || !/^qual-\d{1,4}$/.test(body.matchKey)) return json({ error: "Choose a valid qualification." }, 400);
 			let requestedAutoMapping: { teamNumber: string; type: "new" | "existing"; autoId?: string; path?: AutoPath } | null = null;
@@ -802,17 +1112,67 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		if (body.action === "note") {
 			if (typeof body.category !== "string" || !NOTE_CATEGORIES.includes(body.category as typeof NOTE_CATEGORIES[number])) return json({ error: "Choose a valid note category." }, 400);
 			if (typeof body.note !== "string" || body.note.length > 10000) return json({ error: "Notes must be 10,000 characters or fewer." }, 400);
-			const previous = await env.SCOUTING_DB.prepare("SELECT note FROM event_notes WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND category = ?")
-				.bind(organizationId, league, season, eventCode, body.category).first<{ note: string }>();
-			await env.SCOUTING_DB.batch([
-				env.SCOUTING_DB.prepare(`INSERT INTO event_notes (organization_id, league, season, event_code, category, note, updated_by, updated_by_account_name, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-				ON CONFLICT(organization_id, league, season, event_code, category) DO UPDATE SET note = excluded.note, updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
-					.bind(organizationId, league, season, eventCode, body.category, body.note.trim(), session.sub, displayName),
-				auditStatement(env.SCOUTING_DB, actor, "Updated event notes", `${league} ${season} / ${eventCode}: ${body.category}`,
-					previous?.note ?? null, body.note.trim()),
-			]);
-			return json({ category: body.category, note: { value: body.note.trim(), displayName } });
+			if (typeof body.baseContent !== "string" || body.baseContent.length > 10000) return json({ error: "Reload the shared note before saving your changes." }, 400);
+			const content = body.note;
+			if (!content.trim()) return json({ error: "Shared notes cannot be empty." }, 400);
+			const category = body.category as NoteCategory;
+			const documentKey = [organizationId, league, season, eventCode, category] as const;
+			const existing = await env.SCOUTING_DB.prepare(`SELECT content, attributions, updated_by, updated_by_account_name, updated_at
+				FROM event_note_documents WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND category = ?`)
+				.bind(...documentKey)
+				.first<{ content: string; attributions: string; updated_by: string; updated_by_account_name: string; updated_at: string }>();
+			const current: AttributedNoteDocument = existing
+				? { content: existing.content, attributions: parseNoteAttributions(existing.attributions, existing.content) }
+				: { content: "", attributions: [] };
+			const currentNote = {
+				content: current.content,
+				attributions: current.attributions,
+				updatedBy: existing?.updated_by || "",
+				updatedByAccountName: existing?.updated_by_account_name || "",
+				updatedAt: existing?.updated_at || "",
+			};
+			if (body.baseContent !== current.content) {
+				return json({ error: "Someone else changed these shared notes. Reload the latest version before saving.", currentNote }, 409);
+			}
+			if (content === current.content) return json({ category, note: currentNote });
+			const attributions = updateNoteAttributions(current, content, session.sub, displayName);
+			let updated: D1Result;
+			if (existing) {
+				updated = await env.SCOUTING_DB.prepare(`UPDATE event_note_documents
+					SET content = ?, attributions = ?, updated_by = ?, updated_by_account_name = ?, updated_at = CURRENT_TIMESTAMP
+					WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND category = ? AND content = ?`)
+					.bind(content, JSON.stringify(attributions), session.sub, displayName, ...documentKey, current.content)
+					.run();
+			} else {
+				updated = await env.SCOUTING_DB.prepare(`INSERT INTO event_note_documents
+					(id, organization_id, league, season, event_code, category, content, attributions, updated_by, updated_by_account_name)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(organization_id, league, season, event_code, category) DO NOTHING`)
+					.bind(crypto.randomUUID(), ...documentKey, content, JSON.stringify(attributions), session.sub, displayName)
+					.run();
+			}
+			if (!updated.meta.changes) {
+				const latest = await env.SCOUTING_DB.prepare(`SELECT content, attributions, updated_by, updated_by_account_name, updated_at
+					FROM event_note_documents WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND category = ?`)
+					.bind(...documentKey)
+					.first<{ content: string; attributions: string; updated_by: string; updated_by_account_name: string; updated_at: string }>();
+				if (!latest) throw new Error("Shared event notes could not be saved.");
+				return json({ error: "Someone else changed these shared notes. Reload the latest version before saving.", currentNote: {
+					content: latest.content,
+					attributions: parseNoteAttributions(latest.attributions, latest.content),
+					updatedBy: latest.updated_by,
+					updatedByAccountName: latest.updated_by_account_name,
+					updatedAt: latest.updated_at,
+				} }, 409);
+			}
+			await auditStatement(env.SCOUTING_DB, actor, "Updated shared event notes", `${league} ${season} / ${eventCode}: ${category}`,
+				current.content || null, content).run();
+			return json({ category, note: {
+				content,
+				attributions,
+				updatedBy: session.sub,
+				updatedByAccountName: displayName,
+				updatedAt: new Date().toISOString(),
+			} });
 		}
 		if (body.action === "photos") {
 			if (!validPhotoUrl(body.photosUrl)) return json({ error: "Enter a valid http or https photos link." }, 400);
@@ -873,9 +1233,21 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			console.error(JSON.stringify({ message: "Could not save contributor match note because migration 0019 is not applied" }));
 			return json({ error: "Individual match notes are not ready. Apply database migration 0019 and try again." }, 503);
 		}
+		if (error instanceof Error && /no such table:\s*event_note_documents/i.test(error.message)) {
+			console.error(JSON.stringify({ message: "Could not save shared event notes because migration 0024 is not applied" }));
+			return json({ error: "Shared contributor notes are not ready. Apply database migration 0024 and try again." }, 503);
+		}
 		if (error instanceof Error && /no such table:\s*event_match_auto_selections/i.test(error.message)) {
 			console.error(JSON.stringify({ message: "Could not save team auto selection because migration 0018 is not applied" }));
 			return json({ error: "Team auto selection is not ready. Apply database migration 0018 and try again." }, 503);
+		}
+		if (error instanceof Error && /no such table:\s*event_match_2026_scouting/i.test(error.message)) {
+			console.error(JSON.stringify({ message: "Could not save 2026–27 FTC match scouting because migration 0026 is not applied" }));
+			return json({ error: "2026–27 FTC match scouting is not ready. Apply database migration 0026 and try again." }, 503);
+		}
+		if (error instanceof Error && /(?:no such table:\s*event_match_2026_alliance_scouting|no such column:\s*nectar)/i.test(error.message)) {
+			console.error(JSON.stringify({ message: "Could not save 2026–27 FTC scoring because migration 0027 is not applied" }));
+			return json({ error: "2026–27 FTC scoring is not ready. Apply database migration 0027 and try again." }, 503);
 		}
 		console.error(JSON.stringify({ message: "Could not save event changes", error: error instanceof Error ? error.message : String(error) }));
 		return json({ error: `Could not save event changes: ${error instanceof Error ? error.message : "database error"}` }, 503);

@@ -545,7 +545,7 @@ export function ScoutingDashboard() {
 						{team ? <ScoreTrendChart league={league} teams={[{ teamNumber, events: team.performanceByEvent }]} /> : <p className="dashboard-empty">Team performance is unavailable.</p>}
 					</section>
 					<section className="dashboard-tile dashboard-matches-tile" aria-labelledby="dashboard-matches-title">
-						<header className="dashboard-tile-heading"><div><h2 id="dashboard-matches-title">Next matches</h2></div></header>
+						<header className="dashboard-tile-heading"><div><h2 id="dashboard-matches-title">Upcoming matches</h2></div></header>
 						{isLoadingSchedule ? <p className="dashboard-empty" aria-busy="true">Loading {league} {teamNumber}'s next match...</p>
 							: scheduleError ? <p className="dashboard-empty">{scheduleError}</p>
 								: nextMatch && scheduleEvent ? <NextMatchCard event={scheduleEvent} match={nextMatch} teamNumber={teamNumber} league={league} winProbability={winProbability} favoriteTeams={personal.teamPreset === "SLB" ? ["7247", "5445"] : [teamNumber]} />

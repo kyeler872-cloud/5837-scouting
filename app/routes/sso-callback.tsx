@@ -13,7 +13,7 @@ export default function SsoCallbackPage() {
 		<main className="auth-loading" aria-busy="true">
 			<HandleSSOCallback
 				navigateToApp={({ decorateUrl }) => {
-					const destination = decorateUrl("/home");
+					const destination = decorateUrl("/");
 					if (destination.startsWith("http")) {
 						window.location.href = destination;
 						return;

@@ -1,7 +1,8 @@
-import { SignUp, useAuth, useClerk } from "@clerk/react-router";
+import { useAuth, useClerk } from "@clerk/react-router";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import type { Route } from "./+types/join";
+import { RequireSignIn } from "../require-sign-in";
 
 async function responseData<T>(response: Response) {
 	const text = await response.text();
@@ -74,26 +75,21 @@ export default function JoinOrganizationPage() {
 		}
 	}
 
-	const signUpUrl = `/join${code.trim() ? `?code=${encodeURIComponent(code.trim())}` : ""}`;
 	return (
-		<main className="organization-public-page">
-			<p className="section-kicker">Organization membership</p>
-			<h1>Join an organization</h1>
-			<p>Enter the code shared by an organization mentor. New members join as students.</p>
-			{error && <p className="lookup-error" role="alert">{error}</p>}
-			<form className="organization-form" onSubmit={(event) => void join(event)}>
-				<label htmlFor="organization-code">Organization code</label>
-				<input id="organization-code" autoComplete="off" maxLength={20} value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} required />
-				{isSignedIn
-					? <button className="search-button" type="submit" disabled={!isLoaded || isJoining}>{isJoining ? "Joining..." : "Join organization"}</button>
-					: <Link to={`/?redirect_url=${encodeURIComponent(signUpUrl)}`}>Sign in to continue</Link>}
-			</form>
-			{isLoaded && !isSignedIn && <section className="join-signup">
-				<p>Create your Scout 5837 account to continue with this code.</p>
-				<SignUp forceRedirectUrl={signUpUrl} signInUrl="/" />
-			</section>}
-			<p><Link to="/request-access">Need a new organization? Request access</Link></p>
-			<p><Link to="/onboarding">Back</Link></p>
-		</main>
+		<RequireSignIn>
+			<main className="organization-public-page">
+				<p className="section-kicker">Organization membership</p>
+				<h1>Join an organization</h1>
+				<p>Enter the code shared by an organization mentor. New members join as students.</p>
+				{error && <p className="lookup-error" role="alert">{error}</p>}
+				<form className="organization-form" onSubmit={(event) => void join(event)}>
+					<label htmlFor="organization-code">Organization code</label>
+					<input id="organization-code" autoComplete="off" maxLength={20} value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} required />
+					<button className="search-button" type="submit" disabled={!isLoaded || isJoining}>{isJoining ? "Joining..." : "Join organization"}</button>
+				</form>
+				<p><Link to="/request-access">Need a new organization? Request access</Link></p>
+				<p><Link to="/onboarding">Back</Link></p>
+			</main>
+		</RequireSignIn>
 	);
 }

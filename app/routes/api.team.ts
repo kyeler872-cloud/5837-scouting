@@ -3,6 +3,7 @@ import type { Route } from "./+types/api.team";
 import { cloudflareContext } from "../cloudflare-context";
 import { getOrganizationMembership } from "../organizations.server";
 import { auditStatement, getAuditActor, getLocalContributorName, resolveAccountName, CONTRIBUTOR_EMAIL } from "../audit.server";
+import { parseNoteAttributions, type NoteAttribution } from "../note-attribution";
 
 type FtcEnv = Env & {
 	CLERK_SECRET_KEY?: string;
@@ -223,6 +224,11 @@ function textValue(record: Record<string, unknown>, keys: string[]) {
 		if (typeof value === "number") return String(value);
 	}
 	return "";
+}
+
+function mentionsTeamNumber(note: string, teamNumber: string) {
+	const escaped = teamNumber.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`(^|\\D)${escaped}(?=\\D|$)`).test(note);
 }
 
 function json(data: unknown, status = 200) {
@@ -571,7 +577,6 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	if (!session) return json({ error: "Authentication required." }, 401);
 	if (!env.SCOUTING_DB) return json({ error: "Shared scouting storage is not configured." }, 503);
 	const organization = await getOrganizationMembership(env.SCOUTING_DB, session.sub);
-	if (!organization) return json({ error: "Join an organization before accessing team settings." }, 403);
 
 	if (!league) return json({ error: "Choose FTC or FRC." }, 400);
 	if (league === "FTC" && !getFtcAuthorization(env)) {
@@ -584,12 +589,6 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) {
 		return json({ error: `Enter a valid ${league} team number.` }, 400);
 	}
-	const enabledTeam = await env.SCOUTING_DB.prepare(`SELECT team_number FROM organization_teams
-		WHERE organization_id = ? AND league = ? AND team_number = ?`)
-		.bind(organization.organization_id, league, teamNumber)
-		.first<{ team_number: string }>();
-	if (!enabledTeam) return json({ error: `${league} team ${teamNumber} is not enabled for your organization.` }, 403);
-
 	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
 	let teamProfile: Record<string, unknown> | null = null;
 	let eventsData: Record<string, unknown> | Record<string, unknown>[] | null = null;
@@ -676,6 +675,78 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		teleop = averageFrcScore(matchesData, teamKey, "teleopPoints");
 	}
 
+	const customEvents = await getCustomEvents(env.SCOUTING_DB, dbTeamNumber, season);
+	const eventNames = new Map<string, string>();
+	for (const event of eventRecords) {
+		const code = textValue(event, ["code", "key", "eventCode", "event_key"]);
+		if (code) eventNames.set(code, textValue(event, ["name", "eventName"]) || code);
+	}
+	for (const event of customEvents) eventNames.set(event.code, event.name);
+
+	let eventNoteRows: { event_code: string; category: string; content: string; attributions: NoteAttribution[]; created_at: string }[] = [];
+	let eventNoteDocumentsUnavailable = false;
+	if (organization) try {
+		const documents = await env.SCOUTING_DB.prepare(`SELECT event_code, category, content, attributions, updated_at AS created_at
+			FROM event_note_documents WHERE organization_id = ? AND league = ? AND season = ? ORDER BY updated_at, event_code, category`)
+			.bind(organization.organization_id, league, season)
+			.all<{ event_code: string; category: string; content: string; attributions: string; created_at: string }>();
+		eventNoteRows = documents.results.map((document) => ({
+			event_code: document.event_code,
+			category: document.category,
+			content: document.content,
+			attributions: parseNoteAttributions(document.attributions, document.content),
+			created_at: document.created_at,
+		}));
+	} catch (error) {
+		if (!(error instanceof Error) || !/no such table:\s*event_note_documents/i.test(error.message)) throw error;
+		eventNoteDocumentsUnavailable = true;
+		console.error(JSON.stringify({ message: "Shared contributor event notes are unavailable because migration 0024 is not applied" }));
+		const legacyNotes = await env.SCOUTING_DB.prepare(`SELECT event_code, category, note, updated_by_account_name AS contributor_name, updated_at AS created_at
+			FROM event_notes WHERE organization_id = ? AND league = ? AND season = ? ORDER BY updated_at`)
+			.bind(organization.organization_id, league, season)
+			.all<{ event_code: string; category: string; note: string; contributor_name: string; created_at: string }>();
+		eventNoteRows = legacyNotes.results.map((note) => ({
+			event_code: note.event_code,
+			category: note.category,
+			content: note.note,
+			attributions: note.note ? [{ text: note.note, contributorId: "", contributorName: note.contributor_name }] : [],
+			created_at: note.created_at,
+		}));
+	}
+
+	let qualificationNoteRows: { id: string; event_code: string; match_key: string; phase: string; note: string; contributor_name: string; created_at: string }[] = [];
+	let qualificationNoteEntriesUnavailable = false;
+	if (organization) try {
+		const entries = await env.SCOUTING_DB.prepare(`SELECT id, event_code, match_key, phase, note, contributor_name, created_at
+			FROM event_match_scouting_notes WHERE organization_id = ? AND league = ? AND season = ? ORDER BY created_at, id`)
+			.bind(organization.organization_id, league, season)
+			.all<{ id: string; event_code: string; match_key: string; phase: string; note: string; contributor_name: string; created_at: string }>();
+		qualificationNoteRows = entries.results;
+	} catch (error) {
+		if (!(error instanceof Error) || !/no such table:\s*event_match_scouting_notes/i.test(error.message)) throw error;
+		qualificationNoteEntriesUnavailable = true;
+		console.error(JSON.stringify({ message: "Contributor qualification notes are unavailable because migration 0019 is not applied" }));
+		const legacyNotes = await env.SCOUTING_DB.prepare(`SELECT event_code, match_key, phase, note, updated_by_account_name AS contributor_name, updated_at AS created_at
+			FROM event_match_scouting WHERE organization_id = ? AND league = ? AND season = ? ORDER BY updated_at`)
+			.bind(organization.organization_id, league, season)
+			.all<{ event_code: string; match_key: string; phase: string; note: string; contributor_name: string; created_at: string }>();
+		qualificationNoteRows = legacyNotes.results.map((note) => ({ ...note, id: `legacy:${note.event_code}:${note.match_key}:${note.phase}` }));
+	}
+	const noteMentions = {
+		eventNotes: eventNoteRows.filter((note) => mentionsTeamNumber(note.content, teamNumber)).map((note) => ({
+			...note,
+			eventName: eventNames.get(note.event_code) || note.event_code,
+		})),
+		qualificationNotes: qualificationNoteRows.filter((note) => mentionsTeamNumber(note.note, teamNumber) && /^qual-\d{1,4}$/.test(note.match_key))
+			.map((note) => ({
+				...note,
+				eventName: eventNames.get(note.event_code) || note.event_code,
+				qualificationNumber: Number(note.match_key.slice(5)),
+			})),
+	};
+	if (eventNoteDocumentsUnavailable) warnings.push("General event notes are using legacy attribution until database migration 0024 is applied.");
+	if (qualificationNoteEntriesUnavailable) warnings.push("Qualification notes are using legacy attribution until database migration 0019 is applied.");
+
 	return json({
 		league,
 		teamNumber,
@@ -685,11 +756,12 @@ export async function loader({ request, params, context }: Route.LoaderArgs) {
 		events: eventsData,
 		awards: awardsData,
 		matches: matchesData,
-		overrides: await getOverrides(env.SCOUTING_DB, organization.organization_id, dbTeamNumber, season),
+		overrides: organization ? await getOverrides(env.SCOUTING_DB, organization.organization_id, dbTeamNumber, season) : {},
 		selectedEvents: await getSelectedEvents(env.SCOUTING_DB, dbTeamNumber, season),
-		customEvents: await getCustomEvents(env.SCOUTING_DB, dbTeamNumber, season),
+		customEvents,
 		performance: { auto, teleop },
 		performanceByEvent: eventPerformance(league, teamNumber, matchesData, eventRecords),
+		noteMentions,
 		robots: await getRobots(env.SCOUTING_DB, dbTeamNumber, season),
 		warnings,
 		meta: {

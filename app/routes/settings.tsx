@@ -48,6 +48,8 @@ type PersonalSettings = {
 	primaryTeamNumber: string;
 	organizationTeams: { league: "FTC" | "FRC"; teamNumber: string }[];
 	theme: "dark" | "light";
+	searchLeague: "FTC" | "FRC";
+	searchType: "team" | "event";
 	shortcuts: DashboardShortcut[];
 };
 type CompatibilitySettings = { weights: CompatibilityWeights; updatedBy: string | null; updatedAt: string | null; personal: PersonalSettings; teamSelectionLocked: boolean; kiosk: boolean };
@@ -103,7 +105,7 @@ export default function SettingsPage() {
 	const [settingsNotice, setSettingsNotice] = useState("");
 	const [personal, setPersonal] = useState<PersonalSettings>({
 		teamNumber: 5837, ftcTeamNumber: 7247, teamPreset: "SLB", primaryLeague: "FTC", primaryTeamNumber: "7247",
-		organizationTeams: [], theme: "dark", shortcuts: [],
+		organizationTeams: [], theme: "dark", searchLeague: "FTC", searchType: "team", shortcuts: [],
 	});
 	const [teamSelectionLocked, setTeamSelectionLocked] = useState(false);
 	const [isKiosk, setIsKiosk] = useState(false);
@@ -272,7 +274,7 @@ export default function SettingsPage() {
 					<header className="logs-heading">
 						<p className="section-kicker">Account preferences</p>
 						<h1>Settings</h1>
-						<p>Choose a team from your organization for your dashboard, then review the shared scouting settings available to your account.</p>
+						<p>Choose your dashboard team, set the search bar defaults used across the app, and review the shared scouting settings available to your account.</p>
 					</header>
 					{error && <p className="lookup-error" role="alert">{error}</p>}
 					{settingsError && <p className="lookup-error" role="alert">{settingsError}</p>}
@@ -320,6 +322,20 @@ export default function SettingsPage() {
 								<label><input type="radio" name="theme" value="dark" checked={personal.theme === "dark"} onChange={() => setPersonal((current) => ({ ...current, theme: "dark" }))} /> Dark</label>
 								<label><input type="radio" name="theme" value="light" checked={personal.theme === "light"} onChange={() => setPersonal((current) => ({ ...current, theme: "light" }))} /> Light</label>
 							</fieldset>
+							<label className="personal-search-default">Default search program
+								<select value={personal.searchLeague} onChange={(event) => setPersonal((current) => ({ ...current, searchLeague: event.target.value as "FTC" | "FRC" }))}>
+									<option value="FTC">FTC</option>
+									<option value="FRC">FRC</option>
+								</select>
+								<small className="personal-team-default">The search bar will open to this program.</small>
+							</label>
+							<label className="personal-search-default">Default search type
+								<select value={personal.searchType} onChange={(event) => setPersonal((current) => ({ ...current, searchType: event.target.value as "team" | "event" }))}>
+									<option value="team">Team search</option>
+									<option value="event">Event search</option>
+								</select>
+								<small className="personal-team-default">Choose whether team or event results appear first.</small>
+							</label>
 							<button className="search-button" type="submit" disabled={isSavingPersonal}>{isSavingPersonal ? "Saving..." : "Save personal settings"}</button>
 						</form>
 					</section>

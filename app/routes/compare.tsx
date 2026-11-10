@@ -279,7 +279,7 @@ export default function Compare() {
 	}
 
 	return (
-		<Protected>
+		<Protected requireOrganization={false}>
 			<main className="home-shell">
 				<TopNavigation currentPage="compare" />
 				<section className="comparison-page">

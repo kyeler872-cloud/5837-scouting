@@ -29,6 +29,8 @@ type PersonalSettings = {
 	primaryTeamNumber: string;
 	organizationTeams: { league: "FTC" | "FRC"; teamNumber: string }[];
 	theme: "dark" | "light";
+	searchLeague: "FTC" | "FRC";
+	searchType: "team" | "event";
 	shortcuts: DashboardShortcut[];
 };
 
@@ -49,6 +51,8 @@ const defaultPersonalSettings: PersonalSettings = {
 	primaryTeamNumber: "7247",
 	organizationTeams: [],
 	theme: "dark",
+	searchLeague: "FTC",
+	searchType: "team",
 	shortcuts: [],
 };
 const validFtcTeams = [7247, 5445] as const;
@@ -122,9 +126,9 @@ async function readSettings(db: D1Database) {
 
 async function readPersonalSettings(db: D1Database, userId: string): Promise<PersonalSettings> {
 	const [row, membership] = await Promise.all([
-		db.prepare("SELECT team_number, ftc_team_number, team_preset, primary_league, primary_team_number, theme, shortcuts FROM user_settings WHERE user_id = ?")
+		db.prepare("SELECT team_number, ftc_team_number, team_preset, primary_league, primary_team_number, theme, search_league, search_type, shortcuts FROM user_settings WHERE user_id = ?")
 		.bind(userId)
-		.first<{ team_number: number; ftc_team_number: number; team_preset: string; primary_league: string; primary_team_number: string; theme: string; shortcuts: string }>(),
+		.first<{ team_number: number; ftc_team_number: number; team_preset: string; primary_league: string; primary_team_number: string; theme: string; search_league: string; search_type: string; shortcuts: string }>(),
 		db.prepare("SELECT organization_id FROM organization_memberships WHERE user_id = ?")
 			.bind(userId).first<{ organization_id: string }>(),
 	]);
@@ -176,6 +180,8 @@ async function readPersonalSettings(db: D1Database, userId: string): Promise<Per
 		primaryTeamNumber: selectedTeam.teamNumber,
 		organizationTeams,
 		theme: row.theme === "light" ? "light" : "dark",
+		searchLeague: row.search_league === "FRC" ? "FRC" : "FTC",
+		searchType: row.search_type === "event" ? "event" : "team",
 		shortcuts: parseShortcuts(parsedShortcuts) || [],
 	};
 }
@@ -249,6 +255,8 @@ export async function action({ request, context }: Route.ActionArgs) {
 			primaryLeague?: unknown;
 			primaryTeamNumber?: unknown;
 			theme?: unknown;
+			searchLeague?: unknown;
+			searchType?: unknown;
 			shortcuts?: unknown;
 		};
 	};
@@ -281,7 +289,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 		}
 	}
 	if (body.personal) {
-		const { teamNumber, ftcTeamNumber, teamPreset, primaryLeague, primaryTeamNumber, theme } = body.personal;
+		const { teamNumber, ftcTeamNumber, teamPreset, primaryLeague, primaryTeamNumber, theme, searchLeague, searchType } = body.personal;
 		let contributorSetup: Awaited<ReturnType<typeof getContributorSetup>>;
 		try {
 			contributorSetup = await getContributorSetup(env, session.sub);
@@ -316,9 +324,11 @@ export async function action({ request, context }: Route.ActionArgs) {
 			(primaryLeague !== "FTC" && primaryLeague !== "FRC") ||
 			!selectedTeamExists ||
 			(teamPreset === "SLB" && (membership?.organization_id !== "waterloo-robotics" || !hasWaterlooTeams || primaryLeague !== "FTC" || primaryTeamNumber !== "7247")) ||
-			(theme !== "dark" && theme !== "light")
+			(theme !== "dark" && theme !== "light") ||
+			(searchLeague !== undefined && searchLeague !== "FTC" && searchLeague !== "FRC") ||
+			(searchType !== undefined && searchType !== "team" && searchType !== "event")
 		) {
-			return json({ error: "Choose a valid team and theme." }, 400);
+			return json({ error: "Choose a valid team, theme, and search preference." }, 400);
 		}
 		if (contributorSetup.kiosk) {
 			const kioskTeam = organizationTeams.results.find((team) => team.league === "FTC") || organizationTeams.results[0];
@@ -329,21 +339,25 @@ export async function action({ request, context }: Route.ActionArgs) {
 			return json({ error: "This account's team membership is locked to FRC 5837 and FTC 7247 + 5445." }, 403);
 		}
 		try {
+			const currentPersonal = await readPersonalSettings(env.SCOUTING_DB, session.sub);
 			const shortcuts = body.personal.shortcuts === undefined
-				? (await readPersonalSettings(env.SCOUTING_DB, session.sub)).shortcuts
+				? currentPersonal.shortcuts
 				: parseShortcuts(body.personal.shortcuts);
 			if (!shortcuts) return json({ error: "Add up to 12 valid dashboard shortcuts." }, 400);
+			const selectedSearchLeague = searchLeague === "FRC" ? "FRC" : searchLeague === "FTC" ? "FTC" : currentPersonal.searchLeague;
+			const selectedSearchType = searchType === "event" ? "event" : searchType === "team" ? "team" : currentPersonal.searchType;
 			const legacyFtcTeam = isValidFtcTeamNumber(Number(primaryTeamNumber)) && primaryLeague === "FTC"
 				? Number(primaryTeamNumber)
 				: isValidFtcTeamNumber(ftcTeamNumber) ? ftcTeamNumber : defaultPersonalSettings.ftcTeamNumber;
 			await env.SCOUTING_DB.prepare(`INSERT INTO user_settings
-				(user_id, team_number, ftc_team_number, team_preset, primary_league, primary_team_number, theme, shortcuts, updated_at)
-				VALUES (?, 5837, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				(user_id, team_number, ftc_team_number, team_preset, primary_league, primary_team_number, theme, search_league, search_type, shortcuts, updated_at)
+				VALUES (?, 5837, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(user_id) DO UPDATE SET team_number = 5837, ftc_team_number = excluded.ftc_team_number,
 				team_preset = excluded.team_preset, primary_league = excluded.primary_league,
 				primary_team_number = excluded.primary_team_number, theme = excluded.theme,
+				search_league = excluded.search_league, search_type = excluded.search_type,
 				shortcuts = excluded.shortcuts, updated_at = excluded.updated_at`)
-				.bind(session.sub, legacyFtcTeam, teamPreset, primaryLeague, primaryTeamNumber, theme, JSON.stringify(shortcuts))
+				.bind(session.sub, legacyFtcTeam, teamPreset, primaryLeague, primaryTeamNumber, theme, selectedSearchLeague, selectedSearchType, JSON.stringify(shortcuts))
 				.run();
 			return json(await readAccountPersonalSettings(env, session.sub));
 		} catch (error) {

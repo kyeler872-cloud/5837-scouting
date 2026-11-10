@@ -2,6 +2,7 @@ import { type RouteConfig, index, route } from "@react-router/dev/routes";
 
 export default [
 	index("routes/sign-in.tsx"),
+	route("sign-up", "routes/sign-up.tsx"),
 	route("onboarding", "routes/onboarding.tsx"),
 	route("join", "routes/join.tsx"),
 	route("request-access", "routes/request-access.tsx"),
@@ -10,6 +11,7 @@ export default [
 	route("api/organizations", "routes/api.organizations.ts"),
 	route("api/access-requests", "routes/api.access-requests.ts"),
 	route("api/admin", "routes/api.admin.ts"),
+	route("api/search/teams/:teamNumber", "routes/api.search-team.ts"),
 	route("api/teams/:teamNumber", "routes/api.team.ts"),
 	route("api/events", "routes/api.events.ts"),
 	route("api/events/:league/:season/:eventCode", "routes/api.event.ts"),

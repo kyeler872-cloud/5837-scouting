@@ -6,7 +6,7 @@ import { Link } from "react-router";
 
 type OrganizationStatus = "checking" | "ready" | "missing" | "error";
 
-export function Protected({ children }: { children: React.ReactNode }) {
+export function Protected({ children, requireOrganization = true }: { children: React.ReactNode; requireOrganization?: boolean }) {
 	const { getToken, isLoaded, isSignedIn } = useAuth();
 	const { isLoaded: isUserLoaded, user } = useUser();
 	const [timedOut, setTimedOut] = useState(false);
@@ -125,13 +125,13 @@ export function Protected({ children }: { children: React.ReactNode }) {
 
 	if (organizationStatus === "checking") return <main className="auth-loading" aria-busy="true" />;
 
-	if (organizationStatus === "missing") {
+	if (requireOrganization && organizationStatus === "missing") {
 		return organizationIsAdmin
 			? <>{children}</>
-			: <Navigate to="/join" replace />;
+			: <Navigate to="/onboarding" replace />;
 	}
 
-	if (organizationStatus === "error") {
+	if (requireOrganization && organizationStatus === "error") {
 		return <main className="contributor-name-page"><section>
 			<p className="section-kicker">Organization access</p>
 			<h1>Could not verify access</h1>
