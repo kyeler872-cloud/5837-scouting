@@ -38,6 +38,18 @@ type MatchAllianceScouting = {
 	updatedBy: string;
 	updatedAt: string;
 };
+type MatchScoutingUpdate = {
+	teamNumber: string;
+	flower: string;
+	pollen: string;
+	nectar: string;
+	additionalNotes: string;
+};
+type MatchAllianceScoutingUpdate = {
+	alliance: "red" | "blue";
+	allianceTips: string;
+	allianceAutoPoints: string;
+};
 type MatchAllianceScoutingDraft = { allianceTips: string; allianceAutoPoints: string };
 type EventAuto = { id: string; name: string; alliance: "red" | "blue"; score: number | null; path: AutoPath };
 type MatchAutoSelection = {
@@ -159,6 +171,17 @@ function allianceScoutingDraftFor(match: EventMatch, alliance: "red" | "blue"): 
 	};
 }
 
+function hasMatchScoutingChanged(draft: MatchScoutingDraft, match: EventMatch, teamNumber: string) {
+	const saved = scoutingDraftForTeam(match, teamNumber);
+	return draft.flower !== saved.flower || draft.pollen !== saved.pollen || draft.nectar !== saved.nectar ||
+		draft.additionalNotes !== saved.additionalNotes;
+}
+
+function hasAllianceScoutingChanged(draft: MatchAllianceScoutingDraft, match: EventMatch, alliance: "red" | "blue") {
+	const saved = allianceScoutingDraftFor(match, alliance);
+	return draft.allianceTips !== saved.allianceTips || draft.allianceAutoPoints !== saved.allianceAutoPoints;
+}
+
 export function meta({}: Route.MetaArgs) {
 	return [{ title: "Event | Scout 5837" }, { name: "description", content: "Event details, team roster, and scouting notes." }];
 }
@@ -171,6 +194,9 @@ export default function EventDetailPage() {
 	const season = params.season || "";
 	const eventCode = params.eventCode || "";
 	const [eventData, setEventData] = useState<EventData | null>(null);
+	const [goingToScout, setGoingToScout] = useState<boolean | null>(null);
+	const [attendanceError, setAttendanceError] = useState("");
+	const [savingAttendance, setSavingAttendance] = useState(false);
 	const [category, setCategory] = useState<NoteCategory>("Matches");
 	const [draft, setDraft] = useState("");
 	const [isEditingEventNote, setIsEditingEventNote] = useState(false);
@@ -209,6 +235,8 @@ export default function EventDetailPage() {
 			setLoading(true);
 			setEventData(null);
 			setError("");
+			setGoingToScout(null);
+			setAttendanceError("");
 			setTeamHighlightError("");
 			setHighlightedTeamNumbers([]);
 			setShowAllMatches(false);
@@ -232,6 +260,25 @@ export default function EventDetailPage() {
 						`${match.matchKey}:${alliance}`,
 						allianceScoutingDraftFor(match, alliance),
 					]))));
+				}
+				try {
+					const attendanceResponse = await fetch("/api/my-events", {
+						headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+					});
+					const attendanceData = await readResponse<{
+						events?: { league: League; season: string; eventCode: string }[];
+						error?: string;
+					}>(attendanceResponse);
+					if (!attendanceResponse.ok || !attendanceData.events) {
+						throw new Error(attendanceData.error || "Could not load your scouting events.");
+					}
+					if (!cancelled) setGoingToScout(attendanceData.events.some((event) =>
+						event.league === league && event.season === season && event.eventCode === eventCode
+					));
+				} catch (attendanceLoadError) {
+					if (!cancelled) setAttendanceError(attendanceLoadError instanceof Error
+						? attendanceLoadError.message
+						: "Could not load your scouting events.");
 				}
 				try {
 					const settingsResponse = await fetch("/api/settings?scope=personal", {
@@ -270,6 +317,31 @@ export default function EventDetailPage() {
 		void load();
 		return () => { cancelled = true; };
 	}, [getToken, league, season, eventCode]);
+
+	async function toggleScoutingAttendance() {
+		if (goingToScout === null) return;
+		setSavingAttendance(true);
+		setAttendanceError("");
+		try {
+			const token = await getToken();
+			const response = await fetch("/api/my-events", {
+				method: "POST",
+				headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+				body: JSON.stringify({ league, season, eventCode, going: !goingToScout }),
+			});
+			const data = await readResponse<{ going?: boolean; error?: string }>(response);
+			if (!response.ok || typeof data.going !== "boolean") {
+				throw new Error(data.error || "Could not update your scouting event.");
+			}
+			setGoingToScout(data.going);
+		} catch (attendanceSaveError) {
+			setAttendanceError(attendanceSaveError instanceof Error
+				? attendanceSaveError.message
+				: "Could not update your scouting event.");
+		} finally {
+			setSavingAttendance(false);
+		}
+	}
 
 	useEffect(() => {
 		setDraft(eventData?.notes[category]?.content || "");
@@ -356,6 +428,44 @@ export default function EventDetailPage() {
 						{ ...match, scouting: [...match.scouting.filter((entry) => entry.teamNumber !== record.teamNumber), record] },
 						record.teamNumber,
 					),
+				}));
+			} else if (action.action === "match-scouting-fields" && eventData && typeof data.matchKey === "string") {
+				const matchKey = data.matchKey;
+				const records = data.records as MatchScoutingRecord[];
+				const allianceRecords = data.allianceRecords as MatchAllianceScouting[];
+				const match = eventData.matches.find((item) => item.matchKey === matchKey);
+				if (!match) throw new Error("The qualification could not be found after saving scouting.");
+				const updatedMatch = {
+					...match,
+					scouting: [
+						...match.scouting.filter((entry) => !records.some((record) => record.teamNumber === entry.teamNumber)),
+						...records,
+					],
+					allianceScouting: [
+						...match.allianceScouting.filter((entry) => !allianceRecords.some((record) => record.alliance === entry.alliance)),
+						...allianceRecords,
+					],
+				};
+				setEventData({
+					...eventData,
+					matches: eventData.matches.map((item) => item.matchKey === matchKey ? updatedMatch : item),
+				});
+				setMatchScoutingDrafts((drafts) => ({
+					...drafts,
+					...Object.fromEntries(records.map((record) => [
+						scoutingDraftKey(matchKey, record.teamNumber),
+						scoutingDraftForTeam(updatedMatch, record.teamNumber),
+					])),
+				}));
+				setMatchAllianceScoutingDrafts((drafts) => ({
+					...drafts,
+					...Object.fromEntries(allianceRecords.map((record) => [
+						`${matchKey}:${record.alliance}`,
+						{
+							allianceTips: record.allianceTips === null ? "" : String(record.allianceTips),
+							allianceAutoPoints: record.allianceAutoPoints === null ? "" : String(record.allianceAutoPoints),
+						},
+					])),
 				}));
 			} else if (action.action === "match-alliance-scouting" && eventData && typeof data.matchKey === "string" && data.record) {
 				const matchKey = data.matchKey;
@@ -454,6 +564,16 @@ export default function EventDetailPage() {
 							<h1>{eventData.event.name}</h1>
 							<p>{displayDate(eventData.event.startDate, eventData.event.endDate)}</p>
 							<p>{[eventData.event.city, eventData.event.state, eventData.event.country].filter(Boolean).join(", ") || eventData.event.region}</p>
+							<button
+								className="event-scouting-toggle"
+								type="button"
+								aria-pressed={goingToScout === true}
+								disabled={goingToScout === null || savingAttendance}
+								onClick={() => void toggleScoutingAttendance()}
+							>
+								{savingAttendance ? "Saving..." : goingToScout ? "You're scouting this event · Remove" : "＋ I'm going to scout this event"}
+							</button>
+							{attendanceError && <p className="lookup-error" role="alert">{attendanceError}</p>}
 							{eventData.photosUrl ? <div className="event-photo-actions">
 								<a className="event-photos-button" href={eventData.photosUrl} target="_blank" rel="noreferrer"><PhotoIcon /> Photos</a>
 								{eventData.canAddNotes && <button className="event-photo-edit" type="button" onClick={() => void editPhotosLink()} aria-label="Edit photos link" title="Edit photos link"><PencilIcon /></button>}
@@ -537,7 +657,7 @@ export default function EventDetailPage() {
 								<summary>
 									<header className="event-qualifications-heading">
 										<div><p className="section-kicker">Match scouting</p><h2 id="event-qualifications-heading">Qualification matches</h2></div>
-										<p>Map FTC autonomous paths and save all edited match fields together.</p>
+										<p>Enter alliance and individual team scores, then save all changed scouting together.</p>
 									</header>
 								</summary>
 								<button className="event-match-filter" type="button" aria-pressed={showAllMatches} onClick={() => setShowAllMatches((showingAll) => !showingAll)}>
@@ -572,8 +692,17 @@ export default function EventDetailPage() {
 								const existingMatchNotes = matchPhases.flatMap((phase) =>
 									(match.notes[phase] || []).map((note) => ({ ...note, phase })),
 								);
+								const changedScoutingRecords: MatchScoutingUpdate[] = match.teams.flatMap((teamNumber) => {
+									const draft = matchScoutingDrafts[scoutingDraftKey(match.matchKey, teamNumber)] || scoutingDraftForTeam(match, teamNumber);
+									return hasMatchScoutingChanged(draft, match, teamNumber) ? [{ teamNumber, ...draft }] : [];
+								});
+								const changedAllianceRecords: MatchAllianceScoutingUpdate[] = (["red", "blue"] as const).flatMap((alliance) => {
+									const allianceKey = `${match.matchKey}:${alliance}`;
+									const allianceDraft = matchAllianceScoutingDrafts[allianceKey] || allianceScoutingDraftFor(match, alliance);
+									return hasAllianceScoutingChanged(allianceDraft, match, alliance) ? [{ alliance, ...allianceDraft }] : [];
+								});
 								return <details className="event-qualification" id={`qualification-${match.matchKey}`} key={match.matchKey} open={selectedMatchKey ? match.matchKey === selectedMatchKey : false}>
-								<summary><strong className={featuresAccountTeam ? "event-qualification-featured" : undefined}>Qualification {match.qualificationNumber}</strong>{hasNotes && <span className="event-qualification-note-indicator" role="img" aria-label="Notes saved" title="Notes saved"><NotesIcon /></span>}<time>{matchTimeLabel(match.scheduledTime)}</time><span>{match.teams.length ? `${match.teams.length} teams` : "Teams unavailable"}</span></summary>
+								<summary><strong className={featuresAccountTeam ? "event-qualification-featured" : undefined}>Q{match.qualificationNumber}</strong><time>{matchTimeLabel(match.scheduledTime)}</time>{hasNotes && <span className="event-qualification-note-indicator" role="img" aria-label="Notes saved" title="Notes saved"><NotesIcon /></span>}<span className="event-qualification-match-state">{match.completed ? `Final · ${match.blueScore ?? "—"}–${match.redScore ?? "—"}` : match.teams.length ? `${match.teams.length} teams` : "Teams unavailable"}</span></summary>
 								<div className="event-qualification-content">
 									<div className="dashboard-result-alliances event-qualification-alliances" aria-label={match.completed ? `Final score: blue ${match.blueScore}, red ${match.redScore}` : "Qualification alliances"}>
 										<section className="dashboard-result-blue">
@@ -586,7 +715,7 @@ export default function EventDetailPage() {
 										</section>
 									</div>
 									{league === "FTC" && season === "2026" && <section className="event-match-scouting-2026" aria-label="2026–27 scoring scouting">
-										<header><div><h3>2026–27 FTC scoring</h3><p>Enter team scores and alliance totals below.</p></div></header>
+										<header><div><h3>FTC match scoring</h3><p>Alliance totals and individual team scores</p></div></header>
 										{existingMatchNotes.length > 0 && <details className="event-match-existing-notes">
 											<summary>Existing notes <span>{existingMatchNotes.length}</span></summary>
 											<div>{existingMatchNotes.map((note) => <article className="event-match-note-entry" key={note.id}>
@@ -606,40 +735,18 @@ export default function EventDetailPage() {
 												const allianceDraftKey = `${match.matchKey}:${alliance}`;
 												const allianceDraft = matchAllianceScoutingDrafts[allianceDraftKey] || allianceScoutingDraftFor(match, alliance);
 												return <section className={`event-match-scouting-alliance event-match-scouting-${alliance}`} key={alliance}>
-													<form className="event-match-alliance-form" onSubmit={(event) => {
-														event.preventDefault();
-														void save({
-															action: "match-alliance-scouting",
-															matchKey: match.matchKey,
-															alliance,
-															allianceTips: allianceDraft.allianceTips,
-															allianceAutoPoints: allianceDraft.allianceAutoPoints,
-														}).catch(() => undefined);
-													}}>
+													<div className="event-match-alliance-form">
 														<h4>{alliance} alliance</h4>
 														<div className="event-match-alliance-fields">
 															<label><span>Tips</span><input aria-label={`${alliance} alliance tips`} type="number" min="0" max="10000" step="1" inputMode="numeric" value={allianceDraft.allianceTips} onChange={(event) => setMatchAllianceScoutingDrafts((drafts) => ({ ...drafts, [allianceDraftKey]: { ...allianceDraft, allianceTips: event.target.value } }))} /></label>
 															<label><span>Auto points</span><input aria-label={`${alliance} alliance auto points`} type="number" min="0" max="10000" step="1" inputMode="numeric" value={allianceDraft.allianceAutoPoints} onChange={(event) => setMatchAllianceScoutingDrafts((drafts) => ({ ...drafts, [allianceDraftKey]: { ...allianceDraft, allianceAutoPoints: event.target.value } }))} /></label>
-															<button className="event-match-scouting-save" type="submit" disabled={saving}>{saving ? "Saving..." : "Save alliance"}</button>
 														</div>
-													</form>
+													</div>
 													{allianceTeams.map((team) => {
 														const teamDraftKey = scoutingDraftKey(match.matchKey, team);
 														const teamDraft = matchScoutingDrafts[teamDraftKey] || scoutingDraftForTeam(match, team);
-														const savedRecord = match.scouting.find((record) => record.teamNumber === team);
-														return <form className="event-match-team-form" key={team} onSubmit={(event) => {
-															event.preventDefault();
-															void save({
-																action: "match-score-scouting",
-																matchKey: match.matchKey,
-																teamNumber: team,
-																flower: teamDraft.flower,
-																pollen: teamDraft.pollen,
-																nectar: teamDraft.nectar,
-																additionalNotes: teamDraft.additionalNotes,
-															}).catch(() => undefined);
-														}}>
-															<strong>{team}</strong>
+														return <div className="event-match-team-form" key={team}>
+															<strong>Team {team}</strong>
 															<div className="event-match-team-fields">
 																<label><span>Flowers</span><input aria-label={`Team ${team} flowers`} type="number" min="0" max="10000" step="1" inputMode="numeric" value={teamDraft.flower} onChange={(event) => setMatchScoutingDrafts((drafts) => ({ ...drafts, [teamDraftKey]: { ...teamDraft, flower: event.target.value } }))} /></label>
 																<label><span>Pollen</span><input aria-label={`Team ${team} pollen`} type="number" min="0" max="10000" step="1" inputMode="numeric" value={teamDraft.pollen} onChange={(event) => setMatchScoutingDrafts((drafts) => ({ ...drafts, [teamDraftKey]: { ...teamDraft, pollen: event.target.value } }))} /></label>
@@ -649,12 +756,21 @@ export default function EventDetailPage() {
 																<summary>{teamDraft.additionalNotes.trim() ? "Edit additional notes" : "＋ Additional notes"}</summary>
 																<textarea aria-label={`Team ${team} additional notes`} rows={2} maxLength={10000} value={teamDraft.additionalNotes} onChange={(event) => setMatchScoutingDrafts((drafts) => ({ ...drafts, [teamDraftKey]: { ...teamDraft, additionalNotes: event.target.value } }))} placeholder="Notes about this team's match..." />
 															</details>
-															<button className="event-match-scouting-save" type="submit" disabled={saving}>{saving ? "Saving..." : savedRecord ? "Update" : "Save"}</button>
-														</form>;
+														</div>;
 													})}
 												</section>;
 											})}
 										</div> : <p>Join an organization to add match scouting.</p>}
+										{eventData.canAddNotes && <button className="event-match-scouting-save" type="button"
+											disabled={saving || (!changedScoutingRecords.length && !changedAllianceRecords.length)}
+											onClick={() => void save({
+												action: "match-scouting-fields",
+												matchKey: match.matchKey,
+												teams: changedScoutingRecords,
+												alliances: changedAllianceRecords,
+											}).catch(() => undefined)}>
+											{saving ? "Saving..." : "Save match scouting"}
+										</button>}
 									</section>}
 									{!is2026Scouting && <>
 									<header className="event-qualification-notes-heading"><h3>Scouting notes</h3>{canMapAuto && eventData.canAddNotes && <button className="event-qualification-edit" type="button" aria-expanded={isEditing} onClick={() => {

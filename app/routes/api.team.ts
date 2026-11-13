@@ -504,6 +504,17 @@ function validImageUrl(value: unknown): value is string {
 	}
 }
 
+function validRobotImageUrl(value: unknown): value is string {
+	if (validImageUrl(value)) return true;
+	return typeof value === "string" &&
+		value.length <= 250_000 &&
+		/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
+
+function summarizeRobotImages(images: RobotImage[]) {
+	return images.map(({ id, url }) => ({ id, uploaded: url.startsWith("data:image/") }));
+}
+
 async function fetchFtc<T>(
 	path: string,
 	authorization: string,
@@ -960,7 +971,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		if (body.endMonth !== null && body.endMonth !== "" && !validMonth(body.endMonth)) return json({ error: "Choose a valid robot end month." }, 400);
 		const endMonth = typeof body.endMonth === "string" && body.endMonth ? body.endMonth : null;
 		if (endMonth && body.startMonth && endMonth < body.startMonth) return json({ error: "Robot end month cannot be before its start month." }, 400);
-		if (!Array.isArray(body.imageUrls) || body.imageUrls.length > 8 || !body.imageUrls.every((image) =>
+		if (!Array.isArray(body.imageUrls) || body.imageUrls.length > 5 || !body.imageUrls.every((image) =>
 			typeof image === "object" &&
 			image !== null &&
 			"id" in image &&
@@ -968,8 +979,8 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 			image.id.length > 0 &&
 			image.id.length <= 100 &&
 			"url" in image &&
-			validImageUrl(image.url)
-		)) return json({ error: "Add up to 8 valid image URLs using http or https." }, 400);
+			validRobotImageUrl(image.url)
+		)) return json({ error: "Add up to 5 uploaded robot photos or existing http/https image links." }, 400);
 		const submittedImages = body.imageUrls as { id: string; url: string }[];
 		if (new Set(submittedImages.map((image) => image.id)).size !== submittedImages.length) return json({ error: "Robot photos must have unique IDs." }, 400);
 
@@ -982,6 +993,12 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 				if (!existing) return json({ error: "Robot entry not found." }, 404);
 				const existingImages = parseRobotImages(existing.image_urls);
 				const existingById = new Map(existingImages.map((image) => [image.id, image]));
+				if (submittedImages.some((image) => {
+					const savedImage = existingById.get(image.id);
+					return savedImage
+						? savedImage.url !== image.url && !image.url.startsWith("data:image/jpeg;base64,")
+						: !image.url.startsWith("data:image/jpeg;base64,");
+				})) return json({ error: "Upload new robot photos from your device; existing photo links cannot be replaced." }, 400);
 				const images: RobotImage[] = submittedImages.map((image) => {
 					const savedImage = existingById.get(image.id);
 					if (savedImage) return { ...savedImage, url: image.url };
@@ -1002,7 +1019,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 						JSON.stringify({
 							name: existing.name,
 							description: existing.description,
-							images: parseRobotImages(existing.image_urls).map(({ url }) => url),
+							images: summarizeRobotImages(parseRobotImages(existing.image_urls)),
 							startMonth: existing.start_month,
 							endMonth: existing.end_month,
 							scoringCapabilities: parseRobotScoringCapabilities(JSON.parse(existing.scoring_capabilities)) || EMPTY_SCORING_CAPABILITIES,
@@ -1010,7 +1027,7 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 						JSON.stringify({
 							name: body.robotName.trim(),
 							description: body.description.trim(),
-							images: images.map(({ url }) => url),
+							images: summarizeRobotImages(images),
 							startMonth: body.startMonth,
 							endMonth,
 							scoringCapabilities,

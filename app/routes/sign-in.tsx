@@ -73,7 +73,7 @@ export default function SignInPage() {
 	return (
 		<main className="sign-in-page">
 			<div className="sign-in-brand">Scout 5837</div>
-			<SignIn forceRedirectUrl={redirectUrl} signUpUrl={signUpUrl} />
+			<SignIn routing="path" path="/" forceRedirectUrl={redirectUrl} signUpUrl={signUpUrl} />
 			<Link to={signUpUrl}>Create an account</Link>
 		</main>
 	);

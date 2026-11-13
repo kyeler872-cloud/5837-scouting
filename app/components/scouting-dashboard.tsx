@@ -36,7 +36,9 @@ type TeamData = {
 	customEvents: { code: string; name: string; date: string | null }[];
 };
 type EventLink = { code: string; name: string; start: string | null; end: string | null; custom?: boolean };
-type DashboardEvent = EventLink & { league: League; teamNumbers: string[] };
+type UserScoutingEvent = { league: League; season: string; eventCode: string };
+type ScoutingEventSummary = UserScoutingEvent & EventLink;
+type DashboardEvent = EventLink & { league: League; season: string; teamNumbers: string[]; scouting: boolean };
 type ScheduleMatch = {
 	matchKey: string;
 	qualificationNumber: number;
@@ -49,7 +51,21 @@ type ScheduleMatch = {
 	blueScore: number | null;
 	prediction: { redScore: number | null; blueScore: number | null; redWinProbability: number | null };
 };
-type EventSchedule = { matches: ScheduleMatch[] };
+type EventSchedule = {
+	matches: ScheduleMatch[];
+	event?: { name: string; startDate: string | null; endDate: string | null };
+};
+type AttendingMatch = { event: EventLink; league: League; season: string; match: ScheduleMatch };
+type DashboardUpcomingMatch = {
+	event: EventLink;
+	league: League;
+	season: string;
+	match: ScheduleMatch;
+	teamNumber: string;
+	favoriteTeams: string[];
+	winProbability: number | null;
+	scouting: boolean;
+};
 type LatestMatchResult = { event: EventLink; match: ScheduleMatch };
 type LatestMatchResults = { results: LatestMatchResult[]; error: string };
 type ShortcutKind = DashboardShortcut["kind"];
@@ -96,11 +112,11 @@ function eventRecords(data: TeamData, league: League): EventLink[] {
 	].sort((first, second) => (first.start || "9999").localeCompare(second.start || "9999"));
 }
 
-function eventHref(event: EventLink, league: League, teamNumber: string, matchKey?: string) {
-	const returnTo = `/home?${new URLSearchParams({ team: teamNumber, league, season })}`;
+function eventHref(event: EventLink, league: League, teamNumber: string, matchKey?: string, eventSeason = season) {
+	const returnTo = `/home?${new URLSearchParams({ team: teamNumber, league, season: eventSeason })}`;
 	const query = new URLSearchParams({ returnTo });
 	if (matchKey) query.set("match", matchKey);
-	return `/events/${league}/${season}/${encodeURIComponent(event.code)}?${query}`;
+	return `/events/${league}/${eventSeason}/${encodeURIComponent(event.code)}?${query}`;
 }
 
 function dateLabel(start: string | null, end: string | null) {
@@ -189,6 +205,13 @@ export function ScoutingDashboard() {
 	const [frcTeam, setFrcTeam] = useState<TeamData | null>(null);
 	const [secondFtcTeam, setSecondFtcTeam] = useState<TeamData | null>(null);
 	const [secondFtcTeamError, setSecondFtcTeamError] = useState("");
+	const [scoutingEvents, setScoutingEvents] = useState<UserScoutingEvent[]>([]);
+	const [scoutingEventSummaries, setScoutingEventSummaries] = useState<ScoutingEventSummary[]>([]);
+	const [isLoadingScoutingEvents, setIsLoadingScoutingEvents] = useState(true);
+	const [scoutingEventsError, setScoutingEventsError] = useState("");
+	const [attendingMatches, setAttendingMatches] = useState<AttendingMatch[]>([]);
+	const [isLoadingAttendingMatches, setIsLoadingAttendingMatches] = useState(false);
+	const [attendingMatchesError, setAttendingMatchesError] = useState("");
 	const [schedule, setSchedule] = useState<EventSchedule | null>(null);
 	const [isLoadingSchedule, setIsLoadingSchedule] = useState(false);
 	const [scheduleError, setScheduleError] = useState("");
@@ -295,6 +318,33 @@ export function ScoutingDashboard() {
 		return () => { cancelled = true; };
 	}, [getToken]);
 
+	useEffect(() => {
+		let cancelled = false;
+		setIsLoadingScoutingEvents(true);
+		setScoutingEventsError("");
+		void (async () => {
+			try {
+				const token = await getToken();
+				const response = await fetch("/api/my-events", {
+					headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+				});
+				const data = await readResponse<{ events?: UserScoutingEvent[]; error?: string }>(response);
+				if (!response.ok || !data.events) {
+					throw new Error(data.error || "Could not load your scouting events.");
+				}
+				if (!cancelled) setScoutingEvents(data.events);
+			} catch (loadError) {
+				if (!cancelled) {
+					setScoutingEvents([]);
+					setScoutingEventsError(loadError instanceof Error ? loadError.message : "Could not load your scouting events.");
+				}
+			} finally {
+				if (!cancelled) setIsLoadingScoutingEvents(false);
+			}
+		})();
+		return () => { cancelled = true; };
+	}, [getToken]);
+
 	const teamNumber = personal.primaryTeamNumber;
 	const league = personal.primaryLeague;
 	const events = team ? eventRecords(team, league) : [];
@@ -306,18 +356,34 @@ export function ScoutingDashboard() {
 	const currentEvent = activeEvent(events);
 	const upcomingEvents = events.filter((event) => !event.end || event.end.slice(0, 10) >= new Date().toISOString().slice(0, 10)).slice(0, 5);
 	const dashboardEvents = [
-		...events.map((event) => ({ ...event, league, teamNumbers: [teamNumber] })),
+		...events.map((event) => ({ ...event, league, season, teamNumbers: [teamNumber], scouting: false })),
 		...(personal.teamPreset === "SLB"
-			? secondFtcEvents.map((event) => ({ ...event, league: "FTC" as const, teamNumbers: ["5445"] }))
+			? secondFtcEvents.map((event) => ({ ...event, league: "FTC" as const, season, teamNumbers: ["5445"], scouting: false }))
 			: []),
 		...(personal.teamPreset === "SLB"
-			? frcEvents.map((event) => ({ ...event, league: "FRC" as const, teamNumbers: ["5837"] }))
+			? frcEvents.map((event) => ({ ...event, league: "FRC" as const, season, teamNumbers: ["5837"], scouting: false }))
 			: []),
+		...scoutingEvents.map((scoutingEvent) => {
+			const summary = scoutingEventSummaries.find((event) =>
+				event.league === scoutingEvent.league && event.season === scoutingEvent.season && event.eventCode === scoutingEvent.eventCode
+			);
+			return {
+				code: scoutingEvent.eventCode,
+				name: summary?.name || scoutingEvent.eventCode,
+				start: summary?.start || null,
+				end: summary?.end || null,
+				league: scoutingEvent.league,
+				season: scoutingEvent.season,
+				teamNumbers: [],
+				scouting: true,
+			};
+		}),
 	].filter((event) => !event.end || event.end.slice(0, 10) >= new Date().toISOString().slice(0, 10))
 		.reduce<DashboardEvent[]>((combined, event) => {
-			const existing = combined.find((item) => item.league === event.league && item.code === event.code);
+			const existing = combined.find((item) => item.league === event.league && item.season === event.season && item.code === event.code);
 			if (existing) {
 				existing.teamNumbers = [...new Set([...existing.teamNumbers, ...event.teamNumbers])];
+				existing.scouting ||= event.scouting;
 			} else {
 				combined.push(event);
 			}
@@ -339,6 +405,135 @@ export function ScoutingDashboard() {
 	const secondFtcWinProbability = secondFtcNextMatch?.prediction.redWinProbability == null
 		? null
 		: secondFtcIsRedAlliance ? secondFtcNextMatch.prediction.redWinProbability : 1 - secondFtcNextMatch.prediction.redWinProbability;
+	const favoriteTeams = personal.teamPreset === "SLB" ? ["7247", "5445"] : [teamNumber];
+	const dashboardUpcomingMatches = [
+		...(nextMatch && scheduleEvent ? [{
+			event: scheduleEvent,
+			league,
+			season,
+			match: nextMatch,
+			teamNumber,
+			favoriteTeams,
+			winProbability,
+			scouting: false,
+		}] : []),
+		...(personal.teamPreset === "SLB" && secondFtcNextMatch && secondFtcScheduleEvent ? [{
+			event: secondFtcScheduleEvent,
+			league: "FTC" as const,
+			season,
+			match: secondFtcNextMatch,
+			teamNumber: "5445",
+			favoriteTeams,
+			winProbability: secondFtcWinProbability,
+			scouting: false,
+		}] : []),
+		...attendingMatches.map((item) => ({
+			...item,
+			teamNumber,
+			favoriteTeams,
+			winProbability: null,
+			scouting: true,
+		})),
+	].filter((item) => {
+		const scheduledTime = matchTime({ scheduledTime: item.match.scheduledTime });
+		return !item.match.completed && (!scheduledTime || scheduledTime.getTime() >= Date.now());
+	}).reduce<DashboardUpcomingMatch[]>((matches, item) => {
+		const existing = matches.find((match) =>
+			match.league === item.league && match.season === item.season &&
+			match.event.code === item.event.code && match.match.matchKey === item.match.matchKey,
+		);
+		if (existing) {
+			existing.scouting ||= item.scouting;
+		} else {
+			matches.push(item);
+		}
+		return matches;
+	}, []).sort((first, second) => {
+		const firstTime = matchTime({ scheduledTime: first.match.scheduledTime })?.getTime();
+		const secondTime = matchTime({ scheduledTime: second.match.scheduledTime })?.getTime();
+		if (firstTime !== undefined && secondTime !== undefined) return firstTime - secondTime;
+		if (firstTime !== undefined) return -1;
+		if (secondTime !== undefined) return 1;
+		return first.match.qualificationNumber - second.match.qualificationNumber;
+	});
+
+	useEffect(() => {
+		let cancelled = false;
+		setAttendingMatches([]);
+		setAttendingMatchesError("");
+		setScoutingEventSummaries([]);
+		if (isLoadingScoutingEvents) return () => { cancelled = true; };
+		if (!scoutingEvents.length) {
+			setIsLoadingAttendingMatches(false);
+			return () => { cancelled = true; };
+		}
+		setIsLoadingAttendingMatches(true);
+		void (async () => {
+			try {
+				const token = await getToken();
+				const results = await Promise.all(scoutingEvents.map(async (scoutingEvent) => {
+					try {
+						const response = await fetch(`/api/events/${scoutingEvent.league}/${encodeURIComponent(scoutingEvent.season)}/${encodeURIComponent(scoutingEvent.eventCode)}`, {
+							headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+						});
+						const data = await readResponse<EventSchedule | { error?: string }>(response);
+						if (!response.ok || !("matches" in data) || !Array.isArray(data.matches)) {
+							throw new Error("error" in data ? data.error || "Could not load the event schedule." : "Event schedule response did not include matches.");
+						}
+						const eventData = data as EventSchedule;
+						const event = {
+							code: scoutingEvent.eventCode,
+							name: eventData.event?.name || scoutingEvent.eventCode,
+							start: eventData.event?.startDate || null,
+							end: eventData.event?.endDate || null,
+						};
+						return {
+							event: {
+								...event,
+								league: scoutingEvent.league,
+								season: scoutingEvent.season,
+								eventCode: scoutingEvent.eventCode,
+							} satisfies ScoutingEventSummary,
+							matches: event.end && event.end.slice(0, 10) < new Date().toISOString().slice(0, 10)
+								? []
+								: eventData.matches.filter((match) => !match.completed).map((match) => ({
+									event,
+									league: scoutingEvent.league,
+									season: scoutingEvent.season,
+									match,
+								})),
+							error: "",
+						};
+					} catch (loadError) {
+						return {
+							event: null,
+							matches: [],
+							error: `${scoutingEvent.league} ${scoutingEvent.eventCode}: ${loadError instanceof Error ? loadError.message : "Could not load the event schedule."}`,
+						};
+					}
+				}));
+				if (!cancelled) {
+					setScoutingEventSummaries(results.flatMap((result) => result.event ? [result.event] : []));
+					const matches = results.flatMap((result) => result.matches);
+					matches.sort((first, second) => {
+						const firstTime = matchTime({ scheduledTime: first.match.scheduledTime })?.getTime();
+						const secondTime = matchTime({ scheduledTime: second.match.scheduledTime })?.getTime();
+						if (firstTime !== undefined && secondTime !== undefined) return firstTime - secondTime;
+						if (firstTime !== undefined) return -1;
+						if (secondTime !== undefined) return 1;
+						return first.match.qualificationNumber - second.match.qualificationNumber;
+					});
+					setAttendingMatches(matches);
+					setAttendingMatchesError(results.map((result) => result.error).filter(Boolean).join(" "));
+				}
+			} catch (loadError) {
+				if (!cancelled) setAttendingMatchesError(loadError instanceof Error ? loadError.message : "Could not load your event schedules.");
+			} finally {
+				if (!cancelled) setIsLoadingAttendingMatches(false);
+			}
+		})();
+		return () => { cancelled = true; };
+	}, [getToken, isLoadingScoutingEvents, scoutingEvents]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -514,9 +709,11 @@ export function ScoutingDashboard() {
 				{loading ? <p className="dashboard-status" aria-busy="true">Loading your team dashboard...</p> : <div className="dashboard-grid">
 					<section className="dashboard-tile dashboard-events-tile" aria-labelledby="dashboard-events-title">
 						<header className="dashboard-tile-heading"><div><h2 id="dashboard-events-title">Upcoming events</h2></div><a href="/events" aria-label="Browse events" title="Browse events">↗</a></header>
-						{dashboardEvents.length ? <ul className="dashboard-event-list">{dashboardEvents.map((event) => <li key={`${event.league}-${event.code}`}>
-							<a href={eventHref(event, event.league, event.teamNumbers[0])}>
-								<span><strong>{event.name}</strong>{activeEvent([event]) && <em>Live</em>}<small className="dashboard-event-team">Team{event.teamNumbers.length > 1 ? "s" : ""} {event.teamNumbers.join(", ")} · {event.league}</small></span>
+						{dashboardEvents.length ? <ul className="dashboard-event-list">{dashboardEvents.map((event) => <li key={`${event.league}-${event.season}-${event.code}`}>
+							<a href={eventHref(event, event.league, event.teamNumbers[0] || teamNumber, undefined, event.season)}>
+								<span><strong>{event.name}</strong>{activeEvent([event]) && <em>Live</em>}{event.scouting && <em>Scouting</em>}<small className="dashboard-event-team">{event.teamNumbers.length
+									? `Team${event.teamNumbers.length > 1 ? "s" : ""} ${event.teamNumbers.join(", ")} · ${event.league}`
+									: `You're scouting · ${event.league}`}</small></span>
 								<small>{dateLabel(event.start, event.end)}</small>
 							</a>
 						</li>)}</ul> : <p className="dashboard-empty">No upcoming events are listed for your teams.</p>}
@@ -546,18 +743,18 @@ export function ScoutingDashboard() {
 					</section>
 					<section className="dashboard-tile dashboard-matches-tile" aria-labelledby="dashboard-matches-title">
 						<header className="dashboard-tile-heading"><div><h2 id="dashboard-matches-title">Upcoming matches</h2></div></header>
-						{isLoadingSchedule ? <p className="dashboard-empty" aria-busy="true">Loading {league} {teamNumber}'s next match...</p>
-							: scheduleError ? <p className="dashboard-empty">{scheduleError}</p>
-								: nextMatch && scheduleEvent ? <NextMatchCard event={scheduleEvent} match={nextMatch} teamNumber={teamNumber} league={league} winProbability={winProbability} favoriteTeams={personal.teamPreset === "SLB" ? ["7247", "5445"] : [teamNumber]} />
-									: <p className="dashboard-empty">{scheduleEvent ? `No upcoming qualification for ${league} ${teamNumber}.` : `No current or recent ${league} event is available.`}</p>}
-						{personal.teamPreset === "SLB" && <div className="dashboard-second-team-match">
-							{isLoadingSecondFtcSchedule ? <p className="dashboard-empty" aria-busy="true">Loading FTC 5445's next match...</p>
-								: secondFtcTeamError ? <p className="dashboard-empty" role="alert">{secondFtcTeamError}</p>
-									: secondFtcScheduleError ? <p className="dashboard-empty" role="alert">{secondFtcScheduleError}</p>
-										: secondFtcNextMatch && secondFtcScheduleEvent
-											? <NextMatchCard event={secondFtcScheduleEvent} match={secondFtcNextMatch} teamNumber="5445" league="FTC" winProbability={secondFtcWinProbability} favoriteTeams={["7247", "5445"]} />
-											: <p className="dashboard-empty">{secondFtcScheduleEvent ? "No upcoming qualification for FTC 5445." : "No current or upcoming FTC event is listed for team 5445."}</p>}
-						</div>}
+						{isLoadingSchedule || isLoadingSecondFtcSchedule || isLoadingScoutingEvents || isLoadingAttendingMatches
+							? <p className="dashboard-empty" aria-busy="true">Loading upcoming matches...</p>
+							: dashboardUpcomingMatches.length
+								? <div className="dashboard-upcoming-match-list">{dashboardUpcomingMatches.map((item) =>
+									<UpcomingMatchCard key={`${item.league}-${item.season}-${item.event.code}-${item.match.matchKey}`} {...item} />
+								)}</div>
+								: <p className="dashboard-empty">No upcoming matches found for your teams or scouting events.</p>}
+						{scheduleError && <p className="dashboard-empty" role="alert">{scheduleError}</p>}
+						{personal.teamPreset === "SLB" && (secondFtcTeamError || secondFtcScheduleError) &&
+							<p className="dashboard-empty" role="alert">{secondFtcTeamError || secondFtcScheduleError}</p>}
+						{scoutingEventsError && <p className="dashboard-empty" role="alert">{scoutingEventsError}</p>}
+						{attendingMatchesError && <p className="dashboard-empty" role="alert">{attendingMatchesError}</p>}
 					</section>
 					<section className="dashboard-tile dashboard-results-tile" aria-labelledby="dashboard-results-title">
 						<header className="dashboard-tile-heading"><div><h2 id="dashboard-results-title">Latest results</h2></div></header>
@@ -616,14 +813,7 @@ export function ScoutingDashboard() {
 	);
 }
 
-function NextMatchCard({ event, match, teamNumber, league, winProbability, favoriteTeams }: {
-	event: EventLink;
-	match: ScheduleMatch;
-	teamNumber: string;
-	league: League;
-	winProbability: number | null;
-	favoriteTeams: string[];
-}) {
+function UpcomingMatchCard({ event, match, teamNumber, league, season: eventSeason, winProbability, favoriteTeams, scouting }: DashboardUpcomingMatch) {
 	const isRedAlliance = match.redTeams.includes(teamNumber);
 	const scheduledTime = matchTime({ scheduledTime: match.scheduledTime });
 	const projectedOwnScore = isRedAlliance ? match.prediction.redScore : match.prediction.blueScore;
@@ -633,7 +823,7 @@ function NextMatchCard({ event, match, teamNumber, league, winProbability, favor
 		if (!teams.length) return <small>Teams unavailable</small>;
 		return teams.map((number) => <a
 			key={number}
-			href={`/home?${new URLSearchParams({ team: number, league, season })}`}
+			href={`/home?${new URLSearchParams({ team: number, league, season: eventSeason })}`}
 			className={favoriteTeams.includes(number) ? "dashboard-match-team-featured" : undefined}
 		>
 			{favoriteTeams.includes(number) ? <strong>{number}</strong> : number}
@@ -642,10 +832,11 @@ function NextMatchCard({ event, match, teamNumber, league, winProbability, favor
 
 	return <article className="dashboard-next-match-card">
 		<header className="dashboard-next-match-heading">
-			<div><p className="section-kicker">{league} {teamNumber} · {event.name}</p>
-				<a className="dashboard-next-match-link" href={eventHref(event, league, teamNumber, match.matchKey)}>
+			<div><p className="section-kicker">{league} {event.name}</p>
+				<a className="dashboard-next-match-link" href={eventHref(event, league, teamNumber, match.matchKey, eventSeason)}>
 					<strong>Qualification {match.qualificationNumber}</strong>
-					<time>{scheduledTime?.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) || "Time TBD"}</time>
+					<time>{scheduledTime?.toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) || "Time TBD"}</time>
+					{scouting && <span className="dashboard-scouting-badge">(scouting)</span>}
 				</a>
 			</div>
 		</header>
@@ -653,9 +844,9 @@ function NextMatchCard({ event, match, teamNumber, league, winProbability, favor
 			<section className="dashboard-match-alliance-red"><h4>Red alliance</h4><div>{renderAllianceTeams(match.redTeams)}</div></section>
 			<section className="dashboard-match-alliance-blue"><h4>Blue alliance</h4><div>{renderAllianceTeams(match.blueTeams)}</div></section>
 		</div>
-		<div className="dashboard-match-forecast"><strong>{winProbability === null ? "—" : `${Math.round(winProbability * 100)}%`}</strong><span>Win chance</span>
+		{winProbability !== null && <div className="dashboard-match-forecast"><strong>{Math.round(winProbability * 100)}%</strong><span>Win chance</span>
 			{projectedOwnScore !== null && projectedOpponentScore !== null && <small>Projected score: {projectedOwnScore} - {projectedOpponentScore}</small>}
-		</div>
+		</div>}
 	</article>;
 }
 

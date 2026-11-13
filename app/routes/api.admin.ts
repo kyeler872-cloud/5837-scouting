@@ -218,6 +218,8 @@ export async function action({ request, context }: Route.ActionArgs) {
 				const clerkOrganization = await client.organizations.createOrganization({
 					name: orgName,
 					slug: `${slugPart(orgName)}-${crypto.randomUUID().slice(0, 8)}`,
+					createdBy: session.sub,
+					maxAllowedMemberships: 20,
 				});
 				const orgId = crypto.randomUUID();
 				const statements = [
@@ -243,17 +245,53 @@ export async function action({ request, context }: Route.ActionArgs) {
 			if (matchingUsers.data[0]) {
 				await addOrganizationMember(db, env, organization, matchingUsers.data[0].id, accessRequest.role);
 			} else {
+				let inviterUserId = session.sub;
+				if (accessRequest.organization_id) {
+					const mentor = await db.prepare(`SELECT user_id FROM organization_memberships
+						WHERE organization_id = ? AND role = 'mentor' ORDER BY created_at LIMIT 1`)
+						.bind(organization.id).first<{ user_id: string }>();
+					if (mentor) {
+						inviterUserId = mentor.user_id;
+					} else {
+						const adminMembership = await client.organizations.getOrganizationMembershipList({
+							organizationId: organization.clerk_organization_id,
+							userId: [session.sub],
+							limit: 1,
+						});
+						if (!adminMembership.data.length) {
+							return json({ error: "An organization mentor must be enrolled before this request can be approved." }, 409);
+						}
+					}
+				}
 				await client.organizations.createOrganizationInvitation({
 					organizationId: organization.clerk_organization_id,
 					emailAddress: accessRequest.email,
 					role: accessRequest.role === "mentor" ? "org:admin" : "org:member",
-					inviterUserId: session.sub,
+					inviterUserId,
 					redirectUrl: "https://5837scout.app/join",
 				});
 			}
 			await db.prepare(`UPDATE organization_access_requests SET status = 'accepted', organization_id = ?, updated_at = CURRENT_TIMESTAMP
 				WHERE id = ? AND status = 'pending'`)
 				.bind(organization.id, accessRequest.id).run();
+			if (!accessRequest.organization_id) {
+				try {
+					await client.organizations.deleteOrganizationMembership({
+						organizationId: organization.clerk_organization_id,
+						userId: session.sub,
+					});
+				} catch (error) {
+					console.error(JSON.stringify({
+						message: "Could not remove the temporary admin membership after organization approval",
+						organizationId: organization.id,
+						error: error instanceof Error ? error.message : String(error),
+					}));
+					return json({
+						...await loadAdminData(db, env),
+						warning: "The access request was approved, but the temporary administrator membership could not be removed.",
+					});
+				}
+			}
 			return json(await loadAdminData(db, env));
 		}
 

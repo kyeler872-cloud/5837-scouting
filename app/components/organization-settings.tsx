@@ -102,6 +102,7 @@ export function OrganizationSettings() {
 
 	const organization = data.organization;
 	const isMentor = organization.role === "mentor";
+	const organizationMembers = organization.members || [];
 	return <section className="organization-settings">
 		<p className="section-kicker">Organization · {organization.role}</p>
 		<h2>{organization.name}</h2>
@@ -121,8 +122,8 @@ export function OrganizationSettings() {
 			<ul className="organization-team-list">{organization.teams.map((team) => <li key={`${team.league}:${team.team_number}`}>
 				<span>{team.league}</span><strong>{team.team_number}</strong>
 			</li>)}</ul>
-			<h3>Members</h3>
-			{(organization.members || []).length === 0 ? <p>No members yet.</p> : <ul className="organization-member-list">{(organization.members || []).map((member) => <li key={member.userId}>
+			<h3>Members · {organizationMembers.length} / 20</h3>
+			{organizationMembers.length === 0 ? <p>No members yet.</p> : <ul className="organization-member-list">{organizationMembers.map((member) => <li key={member.userId}>
 				<div className="organization-member-identity">
 					<strong>{member.name}</strong>
 					<span>{member.email}</span>
@@ -132,7 +133,7 @@ export function OrganizationSettings() {
 					<option value="mentor">Mentor</option>
 					<option value="kiosk">Kiosk</option>
 				</select></label>
-				<button className="organization-remove-member" type="button" disabled={saving || member.userId === (organization.members || []).find((item) => item.email.toLowerCase() === "kyelerw@icloud.com")?.userId} onClick={() => void memberAction("remove-member", member.userId)}>Remove member</button>
+				<button className="organization-remove-member" type="button" disabled={saving || member.userId === organizationMembers.find((item) => item.email.toLowerCase() === "kyelerw@icloud.com")?.userId} onClick={() => void memberAction("remove-member", member.userId)}>Remove member</button>
 			</li>)}</ul>}
 		</> : <>
 			<p>{organization.role === "kiosk" ? "Kiosk accounts can scout and add notes. Organization membership is managed by mentors." : "Students can scout and add notes. Organization settings and membership are managed by mentors."}</p>

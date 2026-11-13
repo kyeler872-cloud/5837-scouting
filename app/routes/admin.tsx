@@ -93,16 +93,19 @@ export default function AdminPage() {
 				headers: { "content-type": "application/json", Authorization: `Bearer ${token}` },
 				body: JSON.stringify({ action, ...extra }),
 			});
-			const result = await parseResponse<AdminData & { organization?: { memberCount: number; enrollmentFailureCount?: number } }>(response);
+			const result = await parseResponse<AdminData & {
+				organization?: { memberCount: number; enrollmentFailureCount?: number };
+				warning?: string;
+			}>(response);
 			if (!response.ok) throw new Error(result.error || "Could not update organization access.");
 			if (result.organizations) {
 				setData(result);
 				setOrganizationTeams(Object.fromEntries(result.organizations.map((organization) => [organization.id, teamInputFor(organization.teams)])));
 			}
 			else if (action === "bootstrap-waterloo") await load();
-			setNotice(action === "bootstrap-waterloo"
+			setNotice(result.warning || (action === "bootstrap-waterloo"
 				? `Waterloo Robotics initialized. ${result.organization?.memberCount ?? 0} existing accounts synced; ${result.organization?.enrollmentFailureCount ?? 0} require manual Clerk review.`
-				: "Organization access updated.");
+				: "Organization access updated."));
 		} catch (saveError) {
 			setError(saveError instanceof Error ? saveError.message : "Could not update organization access.");
 		} finally {
@@ -213,16 +216,23 @@ export default function AdminPage() {
 				</section>
 				<section className="organization-admin-card">
 					<h2>Organization members</h2>
-					{data.members.length === 0 ? <p>No organization members are enrolled yet.</p> : <ul className="organization-admin-list">
-						{data.members.map((member) => <li key={`${member.organizationId}:${member.userId}`}>
-							<div className="organization-admin-member-identity">
-								<strong>{member.name}</strong>
-								<span>{member.email} · {member.organizationName}</span>
-							</div>
-							<span className={`organization-role-badge organization-role-${member.role}`}>{member.role}</span>
-							<button className="organization-remove-member" disabled={saving || member.email.toLowerCase() === "kyelerw@icloud.com"} onClick={() => void mutate("remove-member", { userId: member.userId, organizationId: member.organizationId })}>Remove member</button>
-						</li>)}
-					</ul>}
+					{data.members.length === 0 ? <p>No organization members are enrolled yet.</p> : data.organizations.map((organization) => {
+						const members = data.members.filter((member) => member.organizationId === organization.id);
+						if (!members.length) return null;
+						return <div className="organization-admin-member-group" key={organization.id}>
+							<h3>{organization.name} <span>{members.length} members</span></h3>
+							<ul className="organization-admin-list">
+								{members.map((member) => <li key={`${member.organizationId}:${member.userId}`}>
+									<div className="organization-admin-member-identity">
+										<strong>{member.name}</strong>
+										<span>{member.email}</span>
+									</div>
+									<span className={`organization-role-badge organization-role-${member.role}`}>{member.role}</span>
+									<button className="organization-remove-member" disabled={saving || member.email.toLowerCase() === "kyelerw@icloud.com"} onClick={() => void mutate("remove-member", { userId: member.userId, organizationId: member.organizationId })}>Remove member</button>
+								</li>)}
+							</ul>
+						</div>;
+					})}
 				</section>
 			</>}
 		</main>

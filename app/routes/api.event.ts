@@ -852,6 +852,8 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		allianceAutoPoints?: unknown;
 		alliance?: unknown;
 		additionalNotes?: unknown;
+		teams?: unknown;
+		alliances?: unknown;
 	};
 	try {
 		body = await request.json() as typeof body;
@@ -862,6 +864,106 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	try {
 		const actor = await getAuditActor(env, session.sub, getLocalContributorName(request), true);
 		const displayName = actor.accountName;
+		if (body.action === "match-scouting-fields") {
+			if (league !== "FTC" || season !== "2026") {
+				return json({ error: "Scoring scouting is only available for the 2026–27 FTC season." }, 400);
+			}
+			if (typeof body.matchKey !== "string" || !/^qual-\d{1,4}$/.test(body.matchKey)) return json({ error: "Choose a valid qualification." }, 400);
+			if (!Array.isArray(body.teams) || !Array.isArray(body.alliances) ||
+				body.teams.length > 6 || body.alliances.length > 2 || (!body.teams.length && !body.alliances.length)) {
+				return json({ error: "Provide at least one valid team or alliance scouting update." }, 400);
+			}
+			const teams = body.teams.map((value) => {
+				if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+				const record = value as Record<string, unknown>;
+				if (typeof record.teamNumber !== "string" || !/^\d{1,6}$/.test(record.teamNumber) ||
+					!validScoreInput(record.flower) || !validScoreInput(record.pollen) || !validScoreInput(record.nectar) ||
+					typeof record.additionalNotes !== "string" || record.additionalNotes.length > 10000) return null;
+				return {
+					teamNumber: record.teamNumber,
+					flower: parseScoreInput(record.flower),
+					pollen: parseScoreInput(record.pollen),
+					nectar: parseScoreInput(record.nectar),
+					additionalNotes: record.additionalNotes.trim(),
+				};
+			});
+			const alliances = body.alliances.map((value) => {
+				if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+				const record = value as Record<string, unknown>;
+				if ((record.alliance !== "red" && record.alliance !== "blue") ||
+					!validScoreInput(record.allianceTips) || !validScoreInput(record.allianceAutoPoints)) return null;
+				return {
+					alliance: record.alliance,
+					allianceTips: parseScoreInput(record.allianceTips),
+					allianceAutoPoints: parseScoreInput(record.allianceAutoPoints),
+				};
+			});
+			if (teams.some((team) => !team) || alliances.some((alliance) => !alliance) ||
+				new Set(teams.map((team) => team?.teamNumber)).size !== teams.length ||
+				new Set(alliances.map((alliance) => alliance?.alliance)).size !== alliances.length) {
+				return json({ error: "Enter valid, unique team and alliance scouting updates." }, 400);
+			}
+			const match = await getQualificationMatch(env, league, season, eventCode, body.matchKey);
+			if (!match) return json({ error: "Qualification not found in the event schedule." }, 404);
+			if (teams.some((team) => team && !match.teams.includes(team.teamNumber))) {
+				return json({ error: "Choose teams participating in this qualification." }, 400);
+			}
+			if (alliances.some((alliance) => alliance && !(alliance.alliance === "red" ? match.redTeams : match.blueTeams).length)) {
+				return json({ error: "Choose alliances available in the qualification schedule." }, 400);
+			}
+
+			const scoringRecords = teams.filter((team): team is NonNullable<typeof team> => team !== null);
+			const allianceRecords = alliances.filter((alliance): alliance is NonNullable<typeof alliance> => alliance !== null);
+			const statements: D1PreparedStatement[] = [];
+			for (const record of scoringRecords) {
+				const previous = await env.SCOUTING_DB.prepare(`SELECT flower, pollen, nectar, additional_notes
+					FROM event_match_2026_scouting
+					WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND match_key = ? AND team_number = ?`)
+					.bind(organizationId, league, season, eventCode, body.matchKey, record.teamNumber)
+					.first<{ flower: number | null; pollen: number | null; nectar: number | null; additional_notes: string }>();
+				statements.push(
+					env.SCOUTING_DB.prepare(`INSERT INTO event_match_2026_scouting
+						(organization_id, league, season, event_code, match_key, team_number, flower, pollen, nectar, alliance_tips, alliance_auto_points, additional_notes, updated_by, updated_by_account_name, updated_at)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, CURRENT_TIMESTAMP)
+						ON CONFLICT(organization_id, league, season, event_code, match_key, team_number)
+						DO UPDATE SET flower = excluded.flower, pollen = excluded.pollen, nectar = excluded.nectar, additional_notes = excluded.additional_notes,
+							updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
+						.bind(organizationId, league, season, eventCode, body.matchKey, record.teamNumber, record.flower, record.pollen, record.nectar, record.additionalNotes, session.sub, displayName),
+					auditStatement(env.SCOUTING_DB, actor, "Saved 2026–27 FTC match scoring", `${league} ${season} / ${eventCode} / ${body.matchKey} / team ${record.teamNumber}`,
+						previous ? JSON.stringify({
+							flower: previous.flower,
+							pollen: previous.pollen,
+							nectar: previous.nectar,
+							additionalNotes: previous.additional_notes,
+						}) : null, JSON.stringify(record)),
+				);
+			}
+			for (const record of allianceRecords) {
+				const previous = await env.SCOUTING_DB.prepare(`SELECT alliance_tips, alliance_auto_points FROM event_match_2026_alliance_scouting
+					WHERE organization_id = ? AND league = ? AND season = ? AND event_code = ? AND match_key = ? AND alliance = ?`)
+					.bind(organizationId, league, season, eventCode, body.matchKey, record.alliance)
+					.first<{ alliance_tips: number | null; alliance_auto_points: number | null }>();
+				statements.push(
+					env.SCOUTING_DB.prepare(`INSERT INTO event_match_2026_alliance_scouting
+						(organization_id, league, season, event_code, match_key, alliance, alliance_tips, alliance_auto_points, updated_by, updated_by_account_name, updated_at)
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+						ON CONFLICT(organization_id, league, season, event_code, match_key, alliance)
+						DO UPDATE SET alliance_tips = excluded.alliance_tips, alliance_auto_points = excluded.alliance_auto_points,
+							updated_by = excluded.updated_by, updated_by_account_name = excluded.updated_by_account_name, updated_at = excluded.updated_at`)
+						.bind(organizationId, league, season, eventCode, body.matchKey, record.alliance, record.allianceTips, record.allianceAutoPoints, session.sub, displayName),
+					auditStatement(env.SCOUTING_DB, actor, "Saved 2026–27 FTC alliance scoring", `${league} ${season} / ${eventCode} / ${body.matchKey} / ${record.alliance} alliance`,
+						previous ? JSON.stringify({ allianceTips: previous.alliance_tips, allianceAutoPoints: previous.alliance_auto_points }) : null,
+						JSON.stringify({ allianceTips: record.allianceTips, allianceAutoPoints: record.allianceAutoPoints })),
+				);
+			}
+			await env.SCOUTING_DB.batch(statements);
+			const updatedAt = new Date().toISOString();
+			return json({
+				matchKey: body.matchKey,
+				records: scoringRecords.map((record) => ({ ...record, updatedBy: displayName, updatedAt })),
+				allianceRecords: allianceRecords.map((record) => ({ ...record, updatedBy: displayName, updatedAt })),
+			});
+		}
 		if (body.action === "match-score-scouting") {
 			if (league !== "FTC" || season !== "2026") {
 				return json({ error: "Scoring scouting is only available for the 2026–27 FTC season." }, 400);

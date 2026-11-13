@@ -72,6 +72,42 @@ type RobotImage = {
     displayName: string;
 };
 
+async function compressRobotImage(file: File) {
+    if (!file.type.startsWith("image/")) throw new Error("Choose an image file.");
+    if (file.size > 20 * 1024 * 1024) throw new Error("Choose an image smaller than 20 MB.");
+    const bitmap = await createImageBitmap(file);
+    try {
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("This browser cannot process robot photos.");
+        for (const maxDimension of [1280, 960, 720]) {
+            const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+            canvas.width = Math.round(bitmap.width * scale);
+            canvas.height = Math.round(bitmap.height * scale);
+            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            for (const quality of [0.82, 0.7, 0.58]) {
+                const blob = await new Promise<Blob>((resolve, reject) => {
+                    canvas.toBlob((result) => result
+                        ? resolve(result)
+                        : reject(new Error("Could not compress this photo.")), "image/jpeg", quality);
+                });
+                if (blob.size > 180_000) continue;
+                return await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => typeof reader.result === "string"
+                        ? resolve(reader.result)
+                        : reject(new Error("Could not read the compressed photo."));
+                    reader.onerror = () => reject(reader.error || new Error("Could not read the compressed photo."));
+                    reader.readAsDataURL(blob);
+                });
+            }
+        }
+        throw new Error("This photo is too large to upload. Choose a different image.");
+    } finally {
+        bitmap.close();
+    }
+}
+
 // helper to grab a text or number string out of a json object using a list of key names
 function textValue(record: JsonRecord | null, keys: string[]) {
     if (!record) return null;
@@ -798,6 +834,9 @@ function RobotCard({ robot, editing, onEdit, onSave, onSaveAuto, onCancel, showS
     const [endMonth, setEndMonth] = useState(robot.endMonth || "");
     const [images, setImages] = useState(robot.imageUrls);
     const [scoringCapabilities, setScoringCapabilities] = useState(robot.scoringCapabilities || emptyScoringCapabilities());
+    const [compressingPhotos, setCompressingPhotos] = useState(false);
+    const galleryInputRef = useRef<HTMLInputElement>(null);
+    const cameraInputRef = useRef<HTMLInputElement>(null);
     const closeButtonRef = useRef<HTMLButtonElement>(null);
 
     useEffect(() => {
@@ -883,6 +922,7 @@ function RobotCard({ robot, editing, onEdit, onSave, onSaveAuto, onCancel, showS
                         {showScoringCapabilities && <ScoringCapabilitiesEditor value={scoringCapabilities} onChange={setScoringCapabilities} />}
                     </section>
                     <h5 className="robot-photo-editor-heading">Robot photos</h5>
+                    <p className="robot-photo-upload-help">Choose photos from your device or take one with your camera. Photos are compressed before upload.</p>
                     {images.length > 0 && (
                         <div className="robot-images">
                             {images.map((photo, index) => {
@@ -902,11 +942,29 @@ function RobotCard({ robot, editing, onEdit, onSave, onSaveAuto, onCancel, showS
                         </div>
                     )}
                     {photoError && <p className="robot-photo-error" role="alert">{photoError}</p>}
-                    <button className="add-photo-button" type="button" onClick={addPhoto} disabled={images.length >= 8}>＋ Add photo</button>
+                    <input ref={galleryInputRef} className="robot-photo-upload-input" type="file" accept="image/*" multiple aria-label="Choose robot photos from your camera roll"
+                        onChange={(event) => {
+                            const files = Array.from(event.currentTarget.files || []);
+                            event.currentTarget.value = "";
+                            void addPhotos(files);
+                        }} />
+                    <input ref={cameraInputRef} className="robot-photo-upload-input" type="file" accept="image/*" capture="environment" aria-label="Take a robot photo with your camera"
+                        onChange={(event) => {
+                            const files = Array.from(event.currentTarget.files || []);
+                            event.currentTarget.value = "";
+                            void addPhotos(files);
+                        }} />
+                    <div className="robot-photo-upload-actions">
+                        <button className="add-photo-button" type="button" onClick={() => galleryInputRef.current?.click()} disabled={images.length >= 5 || compressingPhotos}>
+                            {compressingPhotos ? "Preparing photos..." : "Choose from camera roll"}
+                        </button>
+                        <button className="add-photo-button" type="button" onClick={() => cameraInputRef.current?.click()} disabled={images.length >= 5 || compressingPhotos}>Take photo</button>
+                    </div>
+                    <small className="robot-photo-limit">{images.length} / 5 photos</small>
                     {formError && <p className="lookup-error" role="alert">{formError}</p>}
                     <div className="robot-form-actions robot-edit-actions">
-                        <button className="search-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Save changes"}</button>
-                        <button className="robot-cancel-button" type="button" onClick={onCancel} disabled={saving}>Cancel</button>
+                        <button className="search-button" type="submit" disabled={saving || compressingPhotos}>{saving ? "Saving..." : "Save changes"}</button>
+                        <button className="robot-cancel-button" type="button" onClick={onCancel} disabled={saving || compressingPhotos}>Cancel</button>
                     </div>
                 </form>
             ) : (
@@ -936,28 +994,27 @@ function RobotCard({ robot, editing, onEdit, onSave, onSaveAuto, onCancel, showS
         </article>
     );
 
-    function addPhoto() {
-        const url = window.prompt("Enter a direct link to one robot photo:");
-        if (url === null) return;
+    async function addPhotos(files: File[]) {
+        if (!files.length) return;
         setPhotoError("");
-        const trimmedUrl = url.trim();
+        if (images.length + files.length > 5) {
+            setPhotoError(`A robot can have up to 5 photos. Remove ${images.length + files.length - 5} photo${images.length + files.length - 5 === 1 ? "" : "s"} first.`);
+            return;
+        }
+        setCompressingPhotos(true);
         try {
-            const parsed = new URL(trimmedUrl);
-            if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("Use an http or https image URL.");
-        } catch {
-            setPhotoError("Enter a valid image URL using http or https.");
-            return;
+            const uploadedImages = await Promise.all(files.map(async (file) => ({
+                id: crypto.randomUUID(),
+                url: await compressRobotImage(file),
+                addedBy: null,
+                displayName: "You (pending save)",
+            })));
+            setImages((current) => [...current, ...uploadedImages]);
+        } catch (error) {
+            setPhotoError(error instanceof Error ? error.message : "Could not prepare this photo.");
+        } finally {
+            setCompressingPhotos(false);
         }
-        if (trimmedUrl.length > 2048) {
-            setPhotoError("Image URLs must be 2,048 characters or fewer.");
-            return;
-        }
-        setImages((current) => [...current, {
-            id: crypto.randomUUID(),
-            url: trimmedUrl,
-            addedBy: null,
-            displayName: "You (pending save)",
-        }]);
     }
 }
 
