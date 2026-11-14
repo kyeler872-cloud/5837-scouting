@@ -801,11 +801,6 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 	if (organization.role !== "mentor") return json({ error: "Only organization mentors can edit team settings." }, 403);
 	if (!league) return json({ error: "Choose FTC or FRC." }, 400);
 	if (!teamNumber || !/^\d{1,6}$/.test(teamNumber)) return json({ error: `Enter a valid ${league} team number.` }, 400);
-	const enabledTeam = await env.SCOUTING_DB.prepare(`SELECT team_number FROM organization_teams
-		WHERE organization_id = ? AND league = ? AND team_number = ?`)
-		.bind(organization.organization_id, league, teamNumber)
-		.first<{ team_number: string }>();
-	if (!enabledTeam) return json({ error: `${league} team ${teamNumber} is not enabled for your organization.` }, 403);
 	const dbTeamNumber = league === "FRC" ? `frc:${teamNumber}` : teamNumber;
 
 	let body: { field?: unknown; value?: unknown; socials?: unknown; eventCode?: unknown; eventName?: unknown; eventDate?: unknown; selected?: unknown; robotId?: unknown; robotName?: unknown; description?: unknown; imageUrls?: unknown; startMonth?: unknown; endMonth?: unknown; scoringCapabilities?: unknown; auto?: unknown };
@@ -813,6 +808,13 @@ export async function action({ request, params, context }: Route.ActionArgs) {
 		body = (await request.json()) as { field?: unknown; value?: unknown };
 	} catch {
 		return json({ error: "Invalid edit payload." }, 400);
+	}
+	if (body.field !== "robot" && body.field !== "robotAuto") {
+		const enabledTeam = await env.SCOUTING_DB.prepare(`SELECT team_number FROM organization_teams
+			WHERE organization_id = ? AND league = ? AND team_number = ?`)
+			.bind(organization.organization_id, league, teamNumber)
+			.first<{ team_number: string }>();
+		if (!enabledTeam) return json({ error: `${league} team ${teamNumber} is not enabled for your organization.` }, 403);
 	}
 
 	if (body.field === "socialLinks") {
